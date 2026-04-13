@@ -17,8 +17,10 @@
 //#include "main.h"
 #include "m1_lp5814.h"
 #include "m1_io_defs.h"
+#include "m1_branding.h"
 #include "m1_compile_cfg.h"
 #include "m1_display.h"
+#include "m1_sdcard.h"
 
 /*************************** D E F I N E S ************************************/
 
@@ -449,8 +451,21 @@ uint8_t m1_gui_submenu_update(const char *phmenu[], uint8_t num_items, uint8_t s
 	{
 		// Draw logo for main menu
 		u8g2_DrawXBMP(&m1_u8g2, MAIN_MENU_LOGO_LEFT_POS_X, MAIN_MENU_LOGO_TOP_POS_Y, MAIN_MENU_LOGO_WIDTH, MAIN_MENU_LOGO_HEIGHT, m1_logo_26x14);
-		u8g2_SetFont(&m1_u8g2, MAIN_MENU_LOGO_FONT);
-		u8g2_DrawStr(&m1_u8g2, MAIN_MENU_LOGO_LEFT_POS_X + MAIN_MENU_LOGO_WIDTH + 1, MAIN_MENU_LOGO_TOP_POS_Y + MAIN_MENU_LOGO_HEIGHT, "M1");
+		u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+		m1_draw_text(&m1_u8g2, 0, MAIN_MENU_LOGO_TOP_POS_Y + MAIN_MENU_LOGO_HEIGHT + 9,
+		             MAIN_MENU_TEXT_FRAME_LEFT_POS_X - 2, M1_PRODUCT_MARK, TEXT_ALIGN_CENTER);
+
+		// Draw SD card status indicator in top-left corner
+		if (m1_sdcard_get_status() == SD_access_OK)
+		{
+			u8g2_DrawXBMP(&m1_u8g2, 1, 1, 10, 10, sd_card_10x10);
+		}
+		else
+		{
+			// Draw a small "no SD" indicator: empty outline + slash
+			u8g2_SetFont(&m1_u8g2, u8g2_font_micro_tr);
+			u8g2_DrawStr(&m1_u8g2, 0, 9, "noSD");
+		}
 	} // if ( menu_level_id==0 )
 
 	// Draw the scroll bar

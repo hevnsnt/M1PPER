@@ -1,8 +1,8 @@
 <!-- See COPYING.txt for license details. -->
 
-# M1 Enhanced Firmware (C3)
+# M1 T-1000 Firmware
 
-Enhanced firmware for the [Monstatek M1](https://monstatek.com) multi-tool device, forked from the [original firmware](https://github.com/Monstatek/M1) with significant feature additions, Flipper Zero file compatibility, and stability improvements.
+T-1000 firmware for the [Monstatek M1](https://monstatek.com) multi-tool device, built from the existing enhanced firmware base and evolving toward a new shell and architecture.
 
 > **This is a community project and is not affiliated with or endorsed by Monstatek.**
 
@@ -61,10 +61,13 @@ Enhanced firmware for the [Monstatek M1](https://monstatek.com) multi-tool devic
 - Snake, Tetris, T-Rex Runner, Pong, Dice — built-in games accessible from the menu
 
 ### WiFi
-- **Scan** — discover nearby access points
-- **Connect** — join networks with password entry
+- **Scan** — discover nearby 2.4 GHz access points
+- **2.4G Survey** — summarize nearby AP count, strongest signal, and busiest channel
+- **Connect** — join 2.4 GHz networks with password entry
 - **Saved Networks** — manage stored WiFi credentials
+- **Sync RTC** — sync the device clock over WiFi SNTP
 - **Status** — view connection state, IP address, signal strength
+- **Band note** — ESP32-C6 Wi-Fi is 2.4 GHz only
 
 ### NFC/RFID Field Detector
 - Detect external 13.56 MHz NFC reader fields and ~125 kHz RFID reader fields
@@ -132,17 +135,36 @@ All files use the Flipper Zero `.ir` format — you can also use IR files from t
 ### Build with CMake
 
 ```bash
-# Configure
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
-# Build
-cmake --build build
-
-# Post-build: inject CRC and C3 metadata
-python tools/append_crc32.py build/M1_v0800_C3.1.bin \
-    --output build/M1_v0800_C3.1_wCRC.bin \
-    --c3-revision 1 --verbose
+# One-command build
+./build.sh
 ```
+
+`build.sh` will try to auto-discover:
+- a complete `arm-none-eabi-gcc` toolchain
+- `cmake`
+- `ninja`
+
+On macOS it prefers STM32CubeIDE's bundled ARM toolchain over partial Homebrew
+installs that are missing the embedded C library. You can still override the
+compiler path explicitly:
+
+```bash
+export ARM_GCC_BIN=/path/to/arm-gnu-toolchain/bin
+./build.sh
+```
+
+If you want to run CMake manually instead, use:
+
+```bash
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+If CMake finds `arm-none-eabi-gcc` but compilation immediately fails on
+`stdint.h`, `string.h`, or `math.h`, the compiler was installed without the
+Arm embedded C library/sysroot. On macOS this can happen with a partial
+Homebrew toolchain. Point `ARM_GCC_BIN` at a complete Arm GNU toolchain that
+includes the `arm-none-eabi` headers and libraries.
 
 ### Build with STM32CubeIDE
 

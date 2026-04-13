@@ -1,0 +1,6 @@
+REM Harmless prank: rotate screen upside down then lock
+DEFAULT_DELAY 100
+DELAY 500
+CTRL ALT DOWN
+DELAY 1000
+GUI l

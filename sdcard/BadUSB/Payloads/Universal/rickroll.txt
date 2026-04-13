@@ -1,0 +1,10 @@
+REM Open browser and rickroll - works on Win/Mac/Linux
+REM Windows: GUI r opens Run dialog
+REM Mac: GUI SPACE opens Spotlight
+REM This version targets Windows
+DEFAULT_DELAY 100
+DELAY 500
+GUI r
+DELAY 800
+STRING https://www.youtube.com/watch?v=dQw4w9WgXcQ
+ENTER

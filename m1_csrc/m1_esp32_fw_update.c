@@ -19,6 +19,7 @@
 #include "stm32h5xx_hal.h"
 #include "main.h"
 #include "m1_esp32_hal.h"
+#include "esp_app_main.h"
 #include "stm32_port.h"
 #include "esp_loader.h"
 #include "app_common.h"
@@ -389,7 +390,10 @@ void setting_esp32_firmware_update(void)
     {
         if ( esp32_update_status!=M1_FW_UPDATE_READY )
         {
-        	break;
+        	// Auto-launch file browser so user doesn't have to select Image File first
+        	setting_esp32_image_file();
+        	if ( esp32_update_status!=M1_FW_UPDATE_READY )
+        		break;
         }
 		//
 		// - Check for battery status before proceeding
@@ -425,6 +429,16 @@ void setting_esp32_firmware_update(void)
 		// Delay for skipping the boot message of the targets
 		HAL_Delay(100);
 		esp32_UART_deinit(); // Disable UART GPIO after update process is done
+
+		// Force full ESP32 re-init so SPI/AT mode is restored on next use.
+		// Without this, m1_esp32_init() sees esp32_init_done=true and skips,
+		// and esp32_main_init() sees esp32_main_init_done=true and skips.
+		// The ESP32 is still in UART-bootloader state, not SPI-AT mode.
+		esp32_disable();
+		HAL_Delay(100);
+		esp32_enable();
+		m1_esp32_force_reinit();
+		esp32_main_force_reinit();
 	} // if ( (uret==M1_FW_UPDATE_FAILED) || (uret==M1_FW_UPDATE_SUCCESS) )
 
 	m1_device_stat.op_mode = old_op_mode;
@@ -797,4 +811,18 @@ void setting_esp32_gui_update(const S_M1_Menu_t *phmenu, uint8_t sel_item)
     } while (m1_u8g2_nextpage());
 
 } // void setting_esp32_gui_update(const S_M1_Menu_t *phmenu, uint8_t sel_item)
+
+/******************************************************************************/
+/**
+  * @brief  Reset ESP32-C6 coprocessor (power cycle)
+  * @param  None
+  * @retval None
+  */
+void setting_esp32_c6_reset(void)
+{
+    esp32_disable();
+    HAL_Delay(100);
+    esp32_enable();
+    m1_info_box_display_draw(INFO_BOX_ROW_1, "ESP32-C6 reset done");
+}
 

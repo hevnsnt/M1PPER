@@ -23,6 +23,7 @@
 //#include "control.h"
 #include "ctrl_api.h"
 #include "esp_app_main.h"
+#include "esp_at_list.h"
 #include "m1_compile_cfg.h"
 
 #ifdef M1_APP_WIFI_CONNECT_ENABLE
@@ -37,6 +38,10 @@
 #define M1_WIFI_AP_SCANNING_TIME	30 // seconds
 
 #define M1_GUI_ROW_SPACING			1
+#define M1_WIFI_BAND_NOTE			"2.4GHz only"
+#define M1_WIFI_SCAN_ATTEMPTS		2
+#define M1_WIFI_RECOVERY_DELAY_MS	400
+#define M1_WIFI_HEALTH_MAX_TRACKED_APS	32
 
 //************************** S T R U C T U R E S *******************************
 
@@ -55,10 +60,22 @@ void menu_wifi_init(void);
 void menu_wifi_exit(void);
 
 void wifi_scan_ap(void);
+void wifi_survey_24g(void);
+void wifi_health_24g(void);
 void wifi_config(void);
 
 static uint16_t wifi_ap_list_print(ctrl_cmd_t *app_resp, bool up_dir);
 static uint8_t wifi_ap_list_validation(ctrl_cmd_t *app_resp);
+static const char *wifi_auth_mode_to_str(int mode);
+static const char *wifi_channel_band_to_str(int channel);
+static const char *wifi_scan_ssid_label(const wifi_scanlist_t *ap);
+static void wifi_free_scan_results(ctrl_cmd_t *app_req);
+static void wifi_display_msg(const char *line1, const char *line2);
+static void wifi_display_panel(const char *title, const char *line1, const char *line2, const char *line3);
+static void wifi_recover_module(void);
+static bool wifi_run_scan(ctrl_cmd_t *app_req, uint8_t attempts);
+static uint16_t wifi_health_count_unmatched(const char lhs[][BSSID_STR_SIZE], uint16_t lhs_count,
+		const char rhs[][BSSID_STR_SIZE], uint16_t rhs_count);
 
 #ifdef M1_APP_WIFI_CONNECT_ENABLE
 void wifi_saved_networks(void);
@@ -66,7 +83,6 @@ void wifi_show_status(void);
 void wifi_disconnect(void);
 static uint16_t wifi_ap_list_get_index(void);
 static bool wifi_do_connect(const char *ssid, const char *password);
-static void wifi_display_msg(const char *line1, const char *line2);
 #endif
 
 /*************** F U N C T I O N   I M P L E M E N T A T I O N ****************/
@@ -93,6 +109,324 @@ static bool wifi_ensure_esp32_ready(void)
 		esp32_main_init();
 	}
 	return get_esp32_main_init_status();
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Map auth mode enum to a short UI string
+  */
+/*============================================================================*/
+static const char *wifi_auth_mode_to_str(int mode)
+{
+	switch (mode)
+	{
+		case WIFI_AUTH_OPEN:
+			return "Open";
+		case WIFI_AUTH_WEP:
+			return "WEP";
+		case WIFI_AUTH_WPA_PSK:
+			return "WPA-PSK";
+		case WIFI_AUTH_WPA2_PSK:
+			return "WPA2-PSK";
+		case WIFI_AUTH_WPA_WPA2_PSK:
+			return "WPA/WPA2";
+		case WIFI_AUTH_WPA2_ENTERPRISE:
+			return "WPA2-Ent";
+		case WIFI_AUTH_WPA3_PSK:
+			return "WPA3-PSK";
+		case WIFI_AUTH_WPA2_WPA3_PSK:
+			return "WPA2/WPA3";
+		default:
+			return "Unknown";
+	}
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Map scanned channel to the expected band label
+  */
+/*============================================================================*/
+static const char *wifi_channel_band_to_str(int channel)
+{
+	if (channel >= 1 && channel <= 14)
+		return "2.4GHz";
+
+	return "unsupported";
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Return a display-safe SSID label for scan results
+  */
+/*============================================================================*/
+static const char *wifi_scan_ssid_label(const wifi_scanlist_t *ap)
+{
+	if (ap == NULL || ap->ssid[0] == 0x00)
+		return "*hidden*";
+
+	return (const char *)ap->ssid;
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Free scan results allocated by the AT parser
+  */
+/*============================================================================*/
+static void wifi_free_scan_results(ctrl_cmd_t *app_req)
+{
+	if (app_req && app_req->u.wifi_ap_scan.out_list != NULL)
+	{
+		free(app_req->u.wifi_ap_scan.out_list);
+		app_req->u.wifi_ap_scan.out_list = NULL;
+		app_req->u.wifi_ap_scan.count = 0;
+	}
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Recover ESP32-C6 after a failed scan transaction
+  */
+/*============================================================================*/
+static void wifi_recover_module(void)
+{
+	esp32_disable();
+	m1_hard_delay(100);
+	esp32_enable();
+	m1_hard_delay(M1_WIFI_RECOVERY_DELAY_MS);
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Run AP scan with one controlled recovery retry
+  */
+/*============================================================================*/
+static bool wifi_run_scan(ctrl_cmd_t *app_req, uint8_t attempts)
+{
+	uint8_t ret = ERROR;
+
+	if (app_req == NULL)
+		return false;
+
+	for (uint8_t attempt = 0; attempt < attempts; attempt++)
+	{
+		wifi_free_scan_results(app_req);
+		app_req->msg_type = CTRL_REQ;
+		app_req->resp_event_status = ERROR;
+		app_req->cmd_timeout_sec = M1_WIFI_AP_SCANNING_TIME;
+		app_req->msg_id = CTRL_RESP_GET_AP_SCAN_LIST;
+
+		ret = wifi_ap_scan_list(app_req);
+		if (ret == SUCCESS && wifi_ap_list_validation(app_req))
+			return true;
+
+		if ((attempt + 1U) < attempts)
+		{
+			wifi_display_panel("WiFi 2.4G", "Scan failed", "Recovering ESP32...", "Retrying now");
+			wifi_recover_module();
+		}
+	}
+
+	return false;
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Count AP BSSIDs present in lhs but not rhs
+  */
+/*============================================================================*/
+static uint16_t wifi_health_count_unmatched(const char lhs[][BSSID_STR_SIZE], uint16_t lhs_count,
+		const char rhs[][BSSID_STR_SIZE], uint16_t rhs_count)
+{
+	uint16_t unmatched = 0;
+
+	for (uint16_t i = 0; i < lhs_count; i++)
+	{
+		bool found = false;
+
+		if (lhs[i][0] == '\0')
+			continue;
+
+		for (uint16_t j = 0; j < rhs_count; j++)
+		{
+			if (rhs[j][0] == '\0')
+				continue;
+
+			if (strncmp(lhs[i], rhs[j], BSSID_STR_SIZE) == 0)
+			{
+				found = true;
+				break;
+			}
+		}
+
+		if (!found)
+			unmatched++;
+	}
+
+	return unmatched;
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Show a 2.4GHz health summary based on nearby AP scan results
+  * @retval
+  */
+/*============================================================================*/
+void wifi_health_24g(void)
+{
+	S_M1_Buttons_Status this_button_status;
+	S_M1_Main_Q_t q_item;
+	BaseType_t ret;
+	ctrl_cmd_t app_req = {0};
+	wifi_scanlist_t *list;
+	uint16_t ap_count = 0;
+	uint16_t open_count = 0;
+	uint16_t hidden_count = 0;
+	uint8_t channel_counts[15] = {0};
+	uint8_t busiest_channel = 0;
+	uint8_t busiest_count = 0;
+	int strongest_rssi = -127;
+	const char *health_label = "Clear";
+	bool running = true;
+	bool prev_valid = false;
+	bool scan_ok;
+	char line1[28];
+	char line2[28];
+	char line3[28];
+	char footer[28];
+	char prev_bssid[M1_WIFI_HEALTH_MAX_TRACKED_APS][BSSID_STR_SIZE] = {{0}};
+	char curr_bssid[M1_WIFI_HEALTH_MAX_TRACKED_APS][BSSID_STR_SIZE] = {{0}};
+	uint16_t prev_count = 0;
+	uint16_t current_tracked = 0;
+	uint16_t new_count = 0;
+	uint16_t gone_count = 0;
+
+	menu_wifi_init();
+
+	while (running)
+	{
+		ap_count = 0;
+		open_count = 0;
+		hidden_count = 0;
+		busiest_channel = 0;
+		busiest_count = 0;
+		strongest_rssi = -127;
+		current_tracked = 0;
+		new_count = 0;
+		gone_count = 0;
+		memset(channel_counts, 0, sizeof(channel_counts));
+		memset(curr_bssid, 0, sizeof(curr_bssid));
+
+		if ( !wifi_ensure_esp32_ready() )
+		{
+			wifi_display_panel("2.4G Health", "ESP32 not ready", "Check module link", "BACK to exit");
+			scan_ok = false;
+		}
+		else
+		{
+			wifi_display_panel("2.4G Health", "Scanning nearby APs", "Building health view", "Please wait...");
+			scan_ok = wifi_run_scan(&app_req, M1_WIFI_SCAN_ATTEMPTS);
+		}
+
+		if (scan_ok)
+		{
+			list = app_req.u.wifi_ap_scan.out_list;
+			ap_count = app_req.u.wifi_ap_scan.count;
+
+			for (uint16_t i = 0; i < ap_count; i++)
+			{
+				if (list[i].ssid[0] == 0x00)
+					hidden_count++;
+				if (list[i].encryption_mode == WIFI_AUTH_OPEN)
+					open_count++;
+				if (list[i].channel >= 1 && list[i].channel <= 14)
+				{
+					channel_counts[list[i].channel]++;
+					if (channel_counts[list[i].channel] > busiest_count)
+					{
+						busiest_count = channel_counts[list[i].channel];
+						busiest_channel = list[i].channel;
+					}
+				}
+				if (list[i].rssi > strongest_rssi)
+					strongest_rssi = list[i].rssi;
+
+				if (current_tracked < M1_WIFI_HEALTH_MAX_TRACKED_APS)
+				{
+					strncpy(curr_bssid[current_tracked], (const char *)list[i].bssid, BSSID_STR_SIZE - 1);
+					curr_bssid[current_tracked][BSSID_STR_SIZE - 1] = '\0';
+					current_tracked++;
+				}
+			}
+
+			if (prev_valid)
+			{
+				new_count = wifi_health_count_unmatched(curr_bssid, current_tracked, prev_bssid, prev_count);
+				gone_count = wifi_health_count_unmatched(prev_bssid, prev_count, curr_bssid, current_tracked);
+			}
+
+			if (ap_count == 0)
+				health_label = "Clear";
+			else if (busiest_count >= 5 || ap_count >= 12 || (new_count + gone_count) >= 6)
+				health_label = "Crowded";
+			else if (busiest_count >= 3 || ap_count >= 7 || (new_count + gone_count) >= 3)
+				health_label = "Busy";
+			else
+				health_label = "Normal";
+
+			snprintf(line1, sizeof(line1), "APs:%u  Open:%u", ap_count, open_count);
+			snprintf(line2, sizeof(line2), "Hidden:%u  Peak:%ddBm", hidden_count, strongest_rssi);
+			if (busiest_channel != 0)
+				snprintf(line3, sizeof(line3), "Ch%u x%u %s +%u/-%u", busiest_channel, busiest_count, health_label, new_count, gone_count);
+			else
+				snprintf(line3, sizeof(line3), "%s +%u/-%u", health_label, new_count, gone_count);
+			snprintf(footer, sizeof(footer), "OK:Rescan BACK:Exit");
+
+			u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+			m1_u8g2_firstpage();
+			u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+			u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
+			u8g2_DrawStr(&m1_u8g2, 2, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, "2.4G Health");
+			u8g2_DrawFrame(&m1_u8g2, 2, 16, 124, 38);
+			u8g2_DrawStr(&m1_u8g2, 6, 26, line1);
+			u8g2_DrawStr(&m1_u8g2, 6, 36, line2);
+			u8g2_DrawStr(&m1_u8g2, 6, 46, line3);
+			u8g2_DrawStr(&m1_u8g2, 4, 64, footer);
+			m1_u8g2_nextpage();
+
+			memcpy(prev_bssid, curr_bssid, sizeof(prev_bssid));
+			prev_count = current_tracked;
+			prev_valid = true;
+		}
+		else
+		{
+			wifi_display_panel("2.4G Health", "Scan failed", "OK to retry", "BACK to exit");
+		}
+
+		ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+		if (ret == pdTRUE && q_item.q_evt_type == Q_EVENT_KEYPAD)
+		{
+			xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+			if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+				running = false;
+			else if (this_button_status.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK)
+			{
+				/* Do nothing - OK button refreshes scan automatically */
+			}
+		}
+	}
+
+	wifi_free_scan_results(&app_req);
+	menu_wifi_exit();
+	xQueueReset(main_q_hdl);
+	m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
 }
 
 
@@ -136,43 +470,23 @@ void wifi_scan_ap(void)
 	u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
 	if ( !wifi_ensure_esp32_ready() )
 	{
-		u8g2_DrawStr(&m1_u8g2, 6, 15 + M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, "ESP32 not ready!");
-		m1_u8g2_nextpage();
+		wifi_display_panel("WiFi 2.4G", "ESP32 not ready", "Check module link", "BACK to exit");
 		/* Fall through to event loop so user can press BACK */
 	}
 
 	list_count = 0;
 
-	m1_u8g2_firstpage();
 	if ( get_esp32_main_init_status() )
 	{
-		u8g2_DrawStr(&m1_u8g2, 6, 15, "Scanning AP...");
-		u8g2_DrawXBMP(&m1_u8g2, M1_LCD_DISPLAY_WIDTH/2 - 18/2, M1_LCD_DISPLAY_HEIGHT/2 - 2, 18, 32, hourglass_18x32);
-		m1_u8g2_nextpage();
+		wifi_display_panel("WiFi 2.4G", "Scanning nearby APs", M1_WIFI_BAND_NOTE, "Please wait...");
 
-		// implemented synchronous
-		app_req.cmd_timeout_sec = M1_WIFI_AP_SCANNING_TIME; //DEFAULT_CTRL_RESP_TIMEOUT //30 sec
-		app_req.msg_id = CTRL_RESP_GET_AP_SCAN_LIST;
-		ret = wifi_ap_scan_list(&app_req);
-		ret = wifi_ap_list_validation(&app_req);
-		if ( ret )
+		if ( wifi_run_scan(&app_req, M1_WIFI_SCAN_ATTEMPTS) )
 		{
 			list_count = wifi_ap_list_print(&app_req, true);
 		} // if ( ret )
 		else
 		{
-			u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_BG);
-			u8g2_DrawBox(&m1_u8g2, M1_LCD_DISPLAY_WIDTH/2 - 18/2, M1_LCD_DISPLAY_HEIGHT/2 - 2, 18, 32); // Clear old image
-			u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
-			u8g2_DrawXBMP(&m1_u8g2, M1_LCD_DISPLAY_WIDTH/2 - 32/2, M1_LCD_DISPLAY_HEIGHT/2 - 2, 32, 32, wifi_error_32x32);
-			u8g2_DrawStr(&m1_u8g2, 6, 15 + M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, "Failed. Retrying...");
-			m1_u8g2_nextpage();
-			// Reset the ESP module
-			esp32_disable();
-			m1_hard_delay(1);
-			esp32_enable();
-			/* stop spi transactions short time to avoid slave sync issues */
-			m1_hard_delay(200);
+			wifi_display_panel("WiFi 2.4G", "Scan failed", "Press BACK to exit", "Try ESP Bring-up");
 		}
 	} // if ( get_esp32_main_init_status() )
 
@@ -186,10 +500,7 @@ void wifi_scan_ap(void)
 				ret = xQueueReceive(button_events_q_hdl, &this_button_status, 0);
 				if ( this_button_status.event[BUTTON_BACK_KP_ID]==BUTTON_EVENT_CLICK ) // user wants to exit?
 				{
-					if (app_req.u.wifi_ap_scan.out_list != NULL)
-					{
-						free(app_req.u.wifi_ap_scan.out_list);
-					}
+					wifi_free_scan_results(&app_req);
 					wifi_ap_list_print(NULL, false);
 
 					xQueueReset(main_q_hdl); // Reset main q before return
@@ -208,10 +519,23 @@ void wifi_scan_ap(void)
 				}
 				else if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_CLICK )
 				{
-#ifdef M1_APP_WIFI_CONNECT_ENABLE
 					if ( !list_count )
-						continue;
+					{
+						if ( !wifi_ensure_esp32_ready() )
+						{
+							wifi_display_panel("WiFi 2.4G", "ESP32 not ready", "Check module link", "BACK to exit");
+							continue;
+						}
 
+						wifi_display_panel("WiFi 2.4G", "Scanning nearby APs", M1_WIFI_BAND_NOTE, "Please wait...");
+						if ( wifi_run_scan(&app_req, M1_WIFI_SCAN_ATTEMPTS) )
+							list_count = wifi_ap_list_print(&app_req, true);
+						else
+							wifi_display_panel("WiFi 2.4G", "Scan failed", "Press OK to retry", "BACK to exit");
+						continue;
+					}
+
+#ifdef M1_APP_WIFI_CONNECT_ENABLE
 					/* Get the currently displayed AP */
 					list = app_req.u.wifi_ap_scan.out_list;
 					s_current_ap_index = wifi_ap_list_get_index();
@@ -288,6 +612,155 @@ void wifi_scan_ap(void)
 } // void wifi_scan_ap(void)
 
 
+/*============================================================================*/
+/**
+  * @brief Survey nearby 2.4 GHz access points and summarize channel usage
+  */
+/*============================================================================*/
+void wifi_survey_24g(void)
+{
+	S_M1_Buttons_Status this_button_status;
+	S_M1_Main_Q_t q_item;
+	BaseType_t ret;
+	ctrl_cmd_t app_req = CTRL_CMD_DEFAULT_REQ();
+	uint8_t channel_counts[14];
+	int strongest_idx;
+	int busiest_channel;
+	int busiest_count;
+	int seen_channels;
+	char prn_msg[25];
+	uint8_t y_offset;
+	bool need_rescan = true;
+
+	u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+
+	if ( !wifi_ensure_esp32_ready() )
+	{
+		wifi_display_msg("ESP32", "not ready!");
+		while (1)
+		{
+			ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+			if (ret==pdTRUE && q_item.q_evt_type==Q_EVENT_KEYPAD)
+			{
+				ret = xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+				if ( this_button_status.event[BUTTON_BACK_KP_ID]==BUTTON_EVENT_CLICK )
+				{
+					xQueueReset(main_q_hdl);
+					m1_esp32_deinit();
+					return;
+				}
+			}
+		}
+	}
+
+	while (1)
+	{
+		if ( need_rescan )
+		{
+			wifi_free_scan_results(&app_req);
+			memset(channel_counts, 0, sizeof(channel_counts));
+			strongest_idx = -1;
+			busiest_channel = -1;
+			busiest_count = 0;
+			seen_channels = 0;
+
+			wifi_display_panel("2.4G Survey", "Scanning channels", "Checking nearby APs", "Please wait...");
+
+			app_req = (ctrl_cmd_t)CTRL_CMD_DEFAULT_REQ();
+			ret = wifi_run_scan(&app_req, M1_WIFI_SCAN_ATTEMPTS);
+
+			if ( ret && app_req.u.wifi_ap_scan.count > 0 && app_req.u.wifi_ap_scan.out_list != NULL )
+			{
+				for (int idx = 0; idx < app_req.u.wifi_ap_scan.count; idx++)
+				{
+					int channel = app_req.u.wifi_ap_scan.out_list[idx].channel;
+					if ( channel >= 1 && channel <= 14 )
+					{
+						channel_counts[channel - 1]++;
+						if ( channel_counts[channel - 1] == 1 )
+							seen_channels++;
+					}
+
+					if ( strongest_idx < 0 ||
+						app_req.u.wifi_ap_scan.out_list[idx].rssi > app_req.u.wifi_ap_scan.out_list[strongest_idx].rssi )
+					{
+						strongest_idx = idx;
+					}
+				}
+
+				for (int ch = 0; ch < 14; ch++)
+				{
+					if ( channel_counts[ch] > busiest_count )
+					{
+						busiest_count = channel_counts[ch];
+						busiest_channel = ch + 1;
+					}
+				}
+
+				m1_u8g2_firstpage();
+				u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
+				u8g2_DrawStr(&m1_u8g2, 2, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, "2.4G Survey");
+
+				y_offset = 14 + M1_GUI_FONT_HEIGHT;
+				snprintf(prn_msg, sizeof(prn_msg), "APs:%d Ch:%d",
+					app_req.u.wifi_ap_scan.count, seen_channels);
+				u8g2_DrawStr(&m1_u8g2, 2, y_offset, prn_msg);
+				y_offset += M1_GUI_FONT_HEIGHT;
+
+				if ( strongest_idx >= 0 )
+				{
+					snprintf(prn_msg, sizeof(prn_msg), "Best:%ddBm ch%d",
+						app_req.u.wifi_ap_scan.out_list[strongest_idx].rssi,
+						app_req.u.wifi_ap_scan.out_list[strongest_idx].channel);
+					u8g2_DrawStr(&m1_u8g2, 2, y_offset, prn_msg);
+					y_offset += M1_GUI_FONT_HEIGHT;
+
+					strncpy(prn_msg, wifi_scan_ssid_label(&app_req.u.wifi_ap_scan.out_list[strongest_idx]), 20);
+					prn_msg[20] = '\0';
+					u8g2_DrawStr(&m1_u8g2, 2, y_offset, prn_msg);
+					y_offset += M1_GUI_FONT_HEIGHT;
+				}
+
+				if ( busiest_channel > 0 )
+					snprintf(prn_msg, sizeof(prn_msg), "Busy:ch%d ap%d", busiest_channel, busiest_count);
+				else
+					snprintf(prn_msg, sizeof(prn_msg), "Busy: none");
+				u8g2_DrawStr(&m1_u8g2, 2, y_offset, prn_msg);
+				y_offset += M1_GUI_FONT_HEIGHT;
+
+				u8g2_DrawStr(&m1_u8g2, 2, y_offset, "OK: Rescan");
+				y_offset += M1_GUI_FONT_HEIGHT;
+				u8g2_DrawStr(&m1_u8g2, 2, y_offset, "BACK: Exit");
+				m1_u8g2_nextpage();
+			}
+			else
+			{
+				wifi_display_panel("2.4G Survey", "No APs found", "OK to rescan", "BACK to exit");
+			}
+
+			need_rescan = false;
+		}
+
+		ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+		if (ret==pdTRUE && q_item.q_evt_type==Q_EVENT_KEYPAD)
+		{
+			ret = xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+			if ( this_button_status.event[BUTTON_BACK_KP_ID]==BUTTON_EVENT_CLICK )
+			{
+				wifi_free_scan_results(&app_req);
+				xQueueReset(main_q_hdl);
+				m1_esp32_deinit();
+				return;
+			}
+			else if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_CLICK )
+			{
+				need_rescan = true;
+			}
+		}
+	}
+} // void wifi_survey_24g(void)
+
+
 
 /*============================================================================*/
 /**
@@ -319,7 +792,7 @@ static uint16_t wifi_ap_list_print(ctrl_cmd_t *app_resp, bool up_dir)
 
 		if (!w_scan_p->count)
 		{
-			strcpy(prn_msg, "No AP found!");
+			strcpy(prn_msg, "No 2.4G APs");
 			M1_LOG_I(M1_LOGDB_TAG, "No AP found\n\r");
 			init_done = false;
 		}
@@ -365,10 +838,10 @@ static uint16_t wifi_ap_list_print(ctrl_cmd_t *app_resp, bool up_dir)
 
 	m1_u8g2_firstpage();
 	u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
-	u8g2_DrawStr(&m1_u8g2, 2, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, "Total AP:");
+	u8g2_DrawStr(&m1_u8g2, 2, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, "2.4G APs:");
 
 	sprintf(prn_msg, "%d", w_scan_p->count);
-	u8g2_DrawStr(&m1_u8g2, 2 + strlen("Total AP: ")*M1_GUI_FONT_WIDTH + 2, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, prn_msg);
+	u8g2_DrawStr(&m1_u8g2, 2 + strlen("2.4G APs: ")*M1_GUI_FONT_WIDTH + 2, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, prn_msg);
 
 	sprintf(prn_msg, "%d/%d", i + 1, w_scan_p->count); // Current AP
 	u8g2_DrawStr(&m1_u8g2, M1_LCD_DISPLAY_WIDTH - 6*M1_GUI_FONT_WIDTH, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, prn_msg);
@@ -387,10 +860,12 @@ static uint16_t wifi_ap_list_print(ctrl_cmd_t *app_resp, bool up_dir)
 	sprintf(prn_msg, "RSSI: %ddBm", list[i].rssi);
 	u8g2_DrawStr(&m1_u8g2, 2, y_offset, prn_msg);
 	y_offset += M1_GUI_FONT_HEIGHT;
-	sprintf(prn_msg, "Channel: %d", list[i].channel);
+	snprintf(prn_msg, sizeof(prn_msg), "Ch:%d %s",
+		list[i].channel, wifi_channel_band_to_str(list[i].channel));
 	u8g2_DrawStr(&m1_u8g2, 2, y_offset, prn_msg);
 	y_offset += M1_GUI_FONT_HEIGHT;
-	sprintf(prn_msg, "Auth mode: %d", list[i].encryption_mode);
+	snprintf(prn_msg, sizeof(prn_msg), "Auth: %s",
+		wifi_auth_mode_to_str(list[i].encryption_mode));
 	u8g2_DrawStr(&m1_u8g2, 2, y_offset, prn_msg);
 
 	m1_u8g2_nextpage(); // Update display RAM
@@ -432,6 +907,40 @@ static uint8_t wifi_ap_list_validation(ctrl_cmd_t *app_resp)
 } // static uint8_t wifi_ap_list_validation(ctrl_cmd_t *app_resp)
 
 
+/*============================================================================*/
+/**
+  * @brief Display a two-line message centered on screen
+  */
+/*============================================================================*/
+static void wifi_display_msg(const char *line1, const char *line2)
+{
+	wifi_display_panel("WiFi 2.4G", line1, line2, NULL);
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Display a framed WiFi panel with up to three lines
+  */
+/*============================================================================*/
+static void wifi_display_panel(const char *title, const char *line1, const char *line2, const char *line3)
+{
+	u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+	m1_u8g2_firstpage();
+	u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+	u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
+	u8g2_DrawStr(&m1_u8g2, 2, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, title ? title : "WiFi 2.4G");
+	u8g2_DrawFrame(&m1_u8g2, 2, 16, 124, 34);
+	if ( line1 )
+		u8g2_DrawStr(&m1_u8g2, 6, 26, line1);
+	if ( line2 )
+		u8g2_DrawStr(&m1_u8g2, 6, 36, line2);
+	if ( line3 )
+		u8g2_DrawStr(&m1_u8g2, 6, 46, line3);
+	m1_u8g2_nextpage();
+}
+
+
 #ifdef M1_APP_WIFI_CONNECT_ENABLE
 
 /*============================================================================*/
@@ -442,23 +951,6 @@ static uint8_t wifi_ap_list_validation(ctrl_cmd_t *app_resp)
 static uint16_t wifi_ap_list_get_index(void)
 {
 	return s_current_ap_index;
-}
-
-
-/*============================================================================*/
-/**
-  * @brief Display a two-line message centered on screen
-  */
-/*============================================================================*/
-static void wifi_display_msg(const char *line1, const char *line2)
-{
-	u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
-	m1_u8g2_firstpage();
-	if ( line1 )
-		u8g2_DrawStr(&m1_u8g2, 6, 25, line1);
-	if ( line2 )
-		u8g2_DrawStr(&m1_u8g2, 6, 25 + M1_GUI_FONT_HEIGHT + 2, line2);
-	m1_u8g2_nextpage();
 }
 
 
@@ -523,6 +1015,7 @@ static bool wifi_do_connect(const char *ssid, const char *password)
 			snprintf(ip_msg, sizeof(ip_msg), "IP: %s", ip_req.u.wifi_ap_config.status);
 			u8g2_DrawStr(&m1_u8g2, 6, 15 + 2*(M1_GUI_FONT_HEIGHT + 2), ip_msg);
 		}
+		u8g2_DrawStr(&m1_u8g2, 6, 15 + 3*(M1_GUI_FONT_HEIGHT + 2), M1_WIFI_BAND_NOTE);
 		m1_u8g2_nextpage();
 		M1_LOG_I(M1_LOGDB_TAG, "Connected to %s, IP: %s\n\r", ssid, ip_req.u.wifi_ap_config.status);
 		vTaskDelay(pdMS_TO_TICKS(2500));
@@ -530,16 +1023,20 @@ static bool wifi_do_connect(const char *ssid, const char *password)
 	}
 	else
 	{
-		const char *err_msg = "Connect failed!";
+		const char *err_msg1 = "WiFi Error:";
+		const char *err_msg2 = "Connect failed!";
 		if ( conn_req.resp_event_status == 2 )
-			err_msg = "Wrong password!";
+			err_msg2 = "Wrong password!";
 		else if ( conn_req.resp_event_status == 3 )
-			err_msg = "AP not found!";
+		{
+			err_msg1 = "2.4GHz only";
+			err_msg2 = "AP not found";
+		}
 		else if ( conn_req.resp_event_status == 1 )
-			err_msg = "Timeout!";
+			err_msg2 = "Timeout!";
 
-		wifi_display_msg("WiFi Error:", err_msg);
-		M1_LOG_E(M1_LOGDB_TAG, "Connect failed: %s (code %ld)\n\r", err_msg, conn_req.resp_event_status);
+		wifi_display_msg(err_msg1, err_msg2);
+		M1_LOG_E(M1_LOGDB_TAG, "Connect failed: %s %s (code %ld)\n\r", err_msg1, err_msg2, conn_req.resp_event_status);
 		vTaskDelay(pdMS_TO_TICKS(2500));
 		return false;
 	}
@@ -622,6 +1119,8 @@ void wifi_saved_networks(void)
 
 		/* Instructions */
 		u8g2_DrawStr(&m1_u8g2, 2, y_offset, "OK: Connect");
+		y_offset += M1_GUI_FONT_HEIGHT;
+		u8g2_DrawStr(&m1_u8g2, 2, y_offset, M1_WIFI_BAND_NOTE);
 		y_offset += M1_GUI_FONT_HEIGHT;
 		u8g2_DrawStr(&m1_u8g2, 2, y_offset, "RIGHT: Delete");
 
@@ -739,7 +1238,7 @@ void wifi_show_status(void)
 	/* Display status */
 	m1_u8g2_firstpage();
 	u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
-	u8g2_DrawStr(&m1_u8g2, 2, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, "WiFi Status");
+	u8g2_DrawStr(&m1_u8g2, 2, M1_GUI_ROW_SPACING + M1_GUI_FONT_HEIGHT, "WiFi 2.4G");
 
 	y_offset = 14 + M1_GUI_FONT_HEIGHT;
 
@@ -773,6 +1272,9 @@ void wifi_show_status(void)
 	{
 		u8g2_DrawStr(&m1_u8g2, 2, y_offset, ip_req.u.wifi_ap_config.out_mac);
 	}
+	y_offset += M1_GUI_FONT_HEIGHT;
+
+	u8g2_DrawStr(&m1_u8g2, 2, y_offset, M1_WIFI_BAND_NOTE);
 	y_offset += M1_GUI_FONT_HEIGHT;
 
 	u8g2_DrawStr(&m1_u8g2, 2, y_offset, "BACK to exit");
@@ -936,6 +1438,45 @@ uint8_t wifi_sync_rtc(void)
 	}
 	return 0;
 }
+
+
+/*============================================================================*/
+/**
+  * @brief User-facing WiFi RTC sync tool
+  */
+/*============================================================================*/
+void wifi_sync_rtc_tool(void)
+{
+	S_M1_Buttons_Status this_button_status;
+	S_M1_Main_Q_t q_item;
+	BaseType_t ret;
+
+	u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+	wifi_display_busy("Syncing RTC...");
+
+	if ( wifi_sync_rtc() )
+		wifi_display_msg("RTC synced", "via WiFi");
+	else
+		wifi_display_msg("RTC sync", "failed");
+
+	vTaskDelay(pdMS_TO_TICKS(2000));
+	m1_esp32_deinit();
+	xQueueReset(main_q_hdl);
+
+	while (1)
+	{
+		ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+		if (ret==pdTRUE && q_item.q_evt_type==Q_EVENT_KEYPAD)
+		{
+			ret = xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+			if ( this_button_status.event[BUTTON_BACK_KP_ID]==BUTTON_EVENT_CLICK )
+			{
+				xQueueReset(main_q_hdl);
+				return;
+			}
+		}
+	}
+} // void wifi_sync_rtc_tool(void)
 
 
 #else /* M1_APP_WIFI_CONNECT_ENABLE not defined */

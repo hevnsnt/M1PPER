@@ -20,8 +20,10 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release")
 endif()
 
-# Set the project name
-set(CMAKE_PROJECT_NAME M1_v0800_C3.12)
+# Internal CMake target name and user-facing artifact basename
+set(CMAKE_PROJECT_NAME M1_T1000)
+set(M1_T1000_VERSION 0.1.0)
+set(M1_FIRMWARE_ARTIFACT_BASENAME M1_T-1000_v${M1_T1000_VERSION})
 
 # C3 fork revision — must match M1_C3_REVISION in m1_fw_update_bl.h
 set(M1_C3_REVISION 12)
@@ -56,6 +58,9 @@ message("Build type: " ${CMAKE_BUILD_TYPE})
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
+set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
+    OUTPUT_NAME ${M1_FIRMWARE_ARTIFACT_BASENAME}
+)
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/m1_01)
@@ -88,9 +93,9 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 )
 
 # Specify the output ELF file
-set(TARGET_ELF "${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.elf")
+set(TARGET_ELF "${CMAKE_BINARY_DIR}/${M1_FIRMWARE_ARTIFACT_BASENAME}.elf")
 # Specify the output BIN file
-set(TARGET_BIN "${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin")
+set(TARGET_BIN "${CMAKE_BINARY_DIR}/${M1_FIRMWARE_ARTIFACT_BASENAME}.bin")
 # Command to display memory usage
 add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E echo "Memory usage:"    
@@ -102,31 +107,31 @@ add_custom_command(
 
 # Command to generate .list file
 add_custom_command(
-    COMMAND ${CMAKE_COMMAND} -E echo "Generating list file ${CMAKE_PROJECT_NAME}.list"
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating list file ${M1_FIRMWARE_ARTIFACT_BASENAME}.list"
     TARGET ${CMAKE_PROJECT_NAME}
     POST_BUILD
     COMMAND ${CMAKE_OBJDUMP}
--h -S ${TARGET_ELF} > ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.list
+-h -S ${TARGET_ELF} > ${CMAKE_BINARY_DIR}/${M1_FIRMWARE_ARTIFACT_BASENAME}.list
     #COMMENT "Generating .list file"
 )
 
 # Command to generate .bin file
 add_custom_command(
-    COMMAND ${CMAKE_COMMAND} -E echo "Generating bin file ${CMAKE_PROJECT_NAME}.bin"
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating bin file ${M1_FIRMWARE_ARTIFACT_BASENAME}.bin"
     TARGET ${CMAKE_PROJECT_NAME}
     POST_BUILD
     COMMAND ${CMAKE_OBJCOPY}
--O binary ${TARGET_ELF} ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
+-O binary ${TARGET_ELF} ${CMAKE_BINARY_DIR}/${M1_FIRMWARE_ARTIFACT_BASENAME}.bin
     #COMMENT "Generating .bin file"
 )
 
 # Command to generate .hex file
 add_custom_command(
-    COMMAND ${CMAKE_COMMAND} -E echo "Generating hex file ${CMAKE_PROJECT_NAME}.hex"
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating hex file ${M1_FIRMWARE_ARTIFACT_BASENAME}.hex"
     TARGET ${CMAKE_PROJECT_NAME}
     POST_BUILD
     COMMAND ${CMAKE_OBJCOPY}
--O ihex ${TARGET_ELF} ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.hex
+-O ihex ${TARGET_ELF} ${CMAKE_BINARY_DIR}/${M1_FIRMWARE_ARTIFACT_BASENAME}.hex
     #COMMENT "Generating .hex file"
 )
 
@@ -135,11 +140,11 @@ add_custom_command(
 add_custom_command(
     TARGET ${CMAKE_PROJECT_NAME}
     POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E echo "Injecting CRC + C3 metadata into ${CMAKE_PROJECT_NAME}_wCRC.bin"
+    COMMAND ${CMAKE_COMMAND} -E echo "Injecting CRC + C3 metadata into ${M1_FIRMWARE_ARTIFACT_BASENAME}_wCRC.bin"
     COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_SOURCE_DIR}/tools/append_crc32.py
         ${TARGET_BIN}
-        --output ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}_wCRC.bin
+        --output ${CMAKE_BINARY_DIR}/${M1_FIRMWARE_ARTIFACT_BASENAME}_wCRC.bin
         --c3-revision ${M1_C3_REVISION}
         --verbose
 )

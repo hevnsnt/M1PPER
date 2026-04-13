@@ -41,7 +41,7 @@
 
 #define APPS_DIR              "0:/apps"
 #define APPS_EXTENSION        ".m1app"
-#define APPS_MAX_FILES        16
+#define APPS_MAX_FILES        32
 #define APPS_NAME_MAX_LEN     40
 #define APPS_PATH_MAX_LEN     128
 
@@ -80,6 +80,7 @@ static app_run_ctx_t s_run_ctx;
 /********************* F U N C T I O N   P R O T O T Y P E S ******************/
 
 static uint16_t apps_scan_directory(void);
+static uint16_t apps_scan_dir_recursive(const char *path, uint16_t count, uint8_t depth);
 static bool apps_read_manifest_name(const char *path, char *name_out, uint16_t name_len);
 static void apps_draw_list(const char *title, uint16_t count, uint16_t selection);
 static void apps_draw_message(const char *line1, const char *line2);
@@ -110,21 +111,44 @@ void m1_app_manager_init(void)
 /*============================================================================*/
 static uint16_t apps_scan_directory(void)
 {
-    DIR dir;
-    FILINFO fno;
-    FRESULT res;
-    uint16_t count = 0;
-
     s_app_count = 0;
 
     /* Ensure the apps directory exists */
     f_mkdir(APPS_DIR);
 
-    res = f_opendir(&dir, APPS_DIR);
+    uint16_t count = apps_scan_dir_recursive(APPS_DIR, 0, 0);
+
+    s_app_count = count;
+    M1_LOG_I(TAG, "Found %u apps in %s (recursive)", count, APPS_DIR);
+    return count;
+}
+
+
+/*============================================================================*/
+/*
+ * @brief  Recursively scan a directory for .m1app files (max depth 3)
+ * @param  path   FatFS directory path to scan
+ * @param  count  Current number of apps found so far
+ * @param  depth  Current recursion depth
+ * @retval uint16_t  Updated count of apps found
+ */
+/*============================================================================*/
+#define APPS_MAX_SCAN_DEPTH  3
+
+static uint16_t apps_scan_dir_recursive(const char *path, uint16_t count, uint8_t depth)
+{
+    DIR dir;
+    FILINFO fno;
+    FRESULT res;
+
+    if (depth > APPS_MAX_SCAN_DEPTH)
+        return count;
+
+    res = f_opendir(&dir, path);
     if (res != FR_OK)
     {
-        M1_LOG_W(TAG, "Cannot open %s (err=%u)", APPS_DIR, res);
-        return 0;
+        M1_LOG_W(TAG, "Cannot open %s (err=%u)", path, res);
+        return count;
     }
 
     while (count < APPS_MAX_FILES)
@@ -133,9 +157,18 @@ static uint16_t apps_scan_directory(void)
         if (res != FR_OK || fno.fname[0] == '\0')
             break;
 
-        /* Skip directories */
-        if (fno.fattrib & AM_DIR)
+        /* Skip hidden/system entries */
+        if (fno.fname[0] == '.')
             continue;
+
+        if (fno.fattrib & AM_DIR)
+        {
+            /* Build subdirectory path and recurse */
+            char subdir[APPS_PATH_MAX_LEN];
+            snprintf(subdir, sizeof(subdir), "%s/%s", path, fno.fname);
+            count = apps_scan_dir_recursive(subdir, count, depth + 1);
+            continue;
+        }
 
         /* Check for .m1app extension */
         uint16_t name_len = (uint16_t)strlen(fno.fname);
@@ -152,7 +185,7 @@ static uint16_t apps_scan_directory(void)
         s_app_list[count].filename[APPS_NAME_MAX_LEN - 1] = '\0';
 
         snprintf(s_app_list[count].full_path, APPS_PATH_MAX_LEN,
-                 "%s/%s", APPS_DIR, fno.fname);
+                 "%s/%s", path, fno.fname);
 
         /* Try to read the display name from the manifest */
         if (!apps_read_manifest_name(s_app_list[count].full_path,
@@ -168,9 +201,6 @@ static uint16_t apps_scan_directory(void)
     }
 
     f_closedir(&dir);
-    s_app_count = count;
-
-    M1_LOG_I(TAG, "Found %u apps in %s", count, APPS_DIR);
     return count;
 }
 

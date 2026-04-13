@@ -25,6 +25,7 @@
 #include "m1_sub_ghz_decenc.h"
 #include "m1_ring_buffer.h"
 #include "m1_storage.h"
+#include "m1_sdcard.h"
 #include "m1_sdcard_man.h"
 #include "flipper_subghz.h"
 #include "m1_settings.h"
@@ -5482,11 +5483,478 @@ void sub_ghz_rssi_meter(void)
 #define FREQ_SCANNER_DEDUP_KHZ    50    /* Merge hits within 50 kHz */
 #define FREQ_SCANNER_VISIBLE_ROWS  5
 
+#define JAM_DETECT_SAMPLE_BINS      48
+#define JAM_DETECT_BUSY_THRESHOLD   -82
+#define JAM_DETECT_SWEEP_COUNT      3
+#define JAM_DETECT_LOG_DIR          DATA_FILEPATH
+#define JAM_DETECT_LOG_FILE         DATA_FILEPATH "/jam_detect.log"
+
 typedef struct {
     uint32_t freq_hz;
     int8_t   rssi;
     uint8_t  hit_count;
 } freq_scanner_hit_t;
+
+typedef struct {
+    char date[12];
+    char time[10];
+    char range[20];
+    char status[20];
+    char metrics1[24];
+} jam_log_entry_t;
+
+static void sub_ghz_jam_log_event(const char *range_label, const char *status_text,
+                                  int16_t avg_rssi, int16_t peak_rssi,
+                                  uint8_t busy_bins, uint32_t peak_freq_hz)
+{
+    FIL file;
+    FRESULT fres;
+    UINT bw;
+    RTC_TimeTypeDef sTime = {0};
+    RTC_DateTypeDef sDate = {0};
+    char log_line[128];
+    uint32_t written_len;
+
+    if (m1_sdcard_get_status() != SD_access_OK)
+        return;
+
+    if (!m1_fb_check_existence(JAM_DETECT_LOG_DIR))
+    {
+        if (m1_fb_make_dir(JAM_DETECT_LOG_DIR) != 0)
+            return;
+    }
+
+    if (HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN) != HAL_OK)
+        return;
+    HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+
+    snprintf(log_line, sizeof(log_line),
+             "20%02u-%02u-%02u %02u:%02u:%02u,%s,%s,avg=%d,peak=%d,busy=%u/%u,peak_freq=%lu.%03lu\r\n",
+             sDate.Year, sDate.Month, sDate.Date,
+             sTime.Hours, sTime.Minutes, sTime.Seconds,
+             range_label, status_text,
+             avg_rssi, peak_rssi,
+             busy_bins, JAM_DETECT_SAMPLE_BINS,
+             peak_freq_hz / 1000000UL, (peak_freq_hz % 1000000UL) / 1000UL);
+
+    fres = f_open(&file, JAM_DETECT_LOG_FILE, FA_OPEN_APPEND | FA_WRITE);
+    if (fres != FR_OK)
+        return;
+
+    written_len = (uint32_t)strlen(log_line);
+    f_write(&file, log_line, written_len, &bw);
+    f_close(&file);
+}
+
+static bool sub_ghz_jam_parse_line(char *line, jam_log_entry_t *entry)
+{
+    char *parts[7] = {0};
+    char *cursor = line;
+    char *stamp_sep;
+
+    for (uint8_t i = 0; i < 7 && cursor != NULL; i++)
+    {
+        parts[i] = cursor;
+        cursor = strchr(cursor, ',');
+        if (cursor != NULL)
+        {
+            *cursor = '\0';
+            cursor++;
+        }
+    }
+
+    if (parts[0] == NULL || parts[1] == NULL || parts[2] == NULL || parts[3] == NULL || parts[4] == NULL)
+        return false;
+
+    stamp_sep = strchr(parts[0], ' ');
+    if (stamp_sep != NULL)
+    {
+        *stamp_sep = '\0';
+        strncpy(entry->date, parts[0], sizeof(entry->date) - 1);
+        entry->date[sizeof(entry->date) - 1] = '\0';
+        strncpy(entry->time, stamp_sep + 1, sizeof(entry->time) - 1);
+        entry->time[sizeof(entry->time) - 1] = '\0';
+    }
+    else
+    {
+        strncpy(entry->date, parts[0], sizeof(entry->date) - 1);
+        entry->date[sizeof(entry->date) - 1] = '\0';
+        entry->time[0] = '\0';
+    }
+
+    strncpy(entry->range, parts[1], sizeof(entry->range) - 1);
+    entry->range[sizeof(entry->range) - 1] = '\0';
+    strncpy(entry->status, parts[2], sizeof(entry->status) - 1);
+    entry->status[sizeof(entry->status) - 1] = '\0';
+    if (parts[5] != NULL)
+        snprintf(entry->metrics1, sizeof(entry->metrics1), "%s %s %s", parts[3], parts[4], parts[5]);
+    else
+        snprintf(entry->metrics1, sizeof(entry->metrics1), "%s %s", parts[3], parts[4]);
+
+    return true;
+}
+
+void sub_ghz_jam_log_viewer(void)
+{
+    S_M1_Buttons_Status this_button_status;
+    S_M1_Main_Q_t q_item;
+    BaseType_t ret;
+    FIL file;
+    FRESULT fres;
+    FSIZE_t file_size;
+    UINT bytes_read = 0;
+    bool running = true;
+    char raw_buf[1024];
+    jam_log_entry_t entries[8] = {0};
+    uint8_t entry_count = 0;
+    uint8_t current = 0;
+
+    memset(raw_buf, 0, sizeof(raw_buf));
+
+    if (m1_sdcard_get_status() != SD_access_OK)
+    {
+        m1_u8g2_firstpage();
+        u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
+        u8g2_DrawStr(&m1_u8g2, 2, 1 + M1_GUI_FONT_HEIGHT, "Jam Log");
+        u8g2_DrawFrame(&m1_u8g2, 2, 16, 124, 34);
+        u8g2_DrawStr(&m1_u8g2, 6, 28, "SD card not ready");
+        u8g2_DrawStr(&m1_u8g2, 6, 42, "BACK to exit");
+        m1_u8g2_nextpage();
+        while (running)
+        {
+            ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+            if (ret == pdTRUE && q_item.q_evt_type == Q_EVENT_KEYPAD)
+            {
+                xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+                if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+                    running = false;
+            }
+        }
+        xQueueReset(main_q_hdl);
+        m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
+        return;
+    }
+
+    fres = f_open(&file, JAM_DETECT_LOG_FILE, FA_READ);
+    if (fres != FR_OK)
+    {
+        m1_u8g2_firstpage();
+        u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
+        u8g2_DrawStr(&m1_u8g2, 2, 1 + M1_GUI_FONT_HEIGHT, "Jam Log");
+        u8g2_DrawFrame(&m1_u8g2, 2, 16, 124, 34);
+        u8g2_DrawStr(&m1_u8g2, 6, 28, "No jam log found");
+        u8g2_DrawStr(&m1_u8g2, 6, 42, "BACK to exit");
+        m1_u8g2_nextpage();
+        while (running)
+        {
+            ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+            if (ret == pdTRUE && q_item.q_evt_type == Q_EVENT_KEYPAD)
+            {
+                xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+                if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+                    running = false;
+            }
+        }
+        xQueueReset(main_q_hdl);
+        m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
+        return;
+    }
+
+    file_size = f_size(&file);
+    if (file_size > (sizeof(raw_buf) - 1))
+        f_lseek(&file, file_size - (sizeof(raw_buf) - 1));
+    else
+        f_lseek(&file, 0);
+
+    f_read(&file, raw_buf, sizeof(raw_buf) - 1, &bytes_read);
+    f_close(&file);
+    raw_buf[bytes_read] = '\0';
+
+    char *start = raw_buf;
+    if (file_size > (sizeof(raw_buf) - 1))
+    {
+        char *first_newline = strchr(raw_buf, '\n');
+        if (first_newline != NULL)
+            start = first_newline + 1;
+    }
+
+    char *line = strtok(start, "\r\n");
+    while (line != NULL)
+    {
+        jam_log_entry_t parsed = {0};
+
+        if (sub_ghz_jam_parse_line(line, &parsed))
+        {
+            if (entry_count < 8)
+            {
+                entries[entry_count++] = parsed;
+            }
+            else
+            {
+                memmove(&entries[0], &entries[1], sizeof(entries[0]) * 7);
+                entries[7] = parsed;
+            }
+        }
+
+        line = strtok(NULL, "\r\n");
+    }
+
+    if (entry_count == 0)
+    {
+        m1_u8g2_firstpage();
+        u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
+        u8g2_DrawStr(&m1_u8g2, 2, 1 + M1_GUI_FONT_HEIGHT, "Jam Log");
+        u8g2_DrawFrame(&m1_u8g2, 2, 16, 124, 34);
+        u8g2_DrawStr(&m1_u8g2, 6, 28, "Log is empty");
+        u8g2_DrawStr(&m1_u8g2, 6, 42, "BACK to exit");
+        m1_u8g2_nextpage();
+        while (running)
+        {
+            ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+            if (ret == pdTRUE && q_item.q_evt_type == Q_EVENT_KEYPAD)
+            {
+                xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+                if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+                    running = false;
+            }
+        }
+        xQueueReset(main_q_hdl);
+        m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
+        return;
+    }
+
+    current = entry_count - 1;
+
+    while (running)
+    {
+        char footer[20];
+
+        snprintf(footer, sizeof(footer), "%u/%u", current + 1, entry_count);
+
+        u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+        m1_u8g2_firstpage();
+        u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
+        u8g2_DrawStr(&m1_u8g2, 2, 1 + M1_GUI_FONT_HEIGHT, "Jam Log");
+        u8g2_DrawFrame(&m1_u8g2, 2, 16, 124, 38);
+        u8g2_DrawStr(&m1_u8g2, 6, 24, entries[current].time[0] ? entries[current].time : entries[current].date);
+        u8g2_DrawStr(&m1_u8g2, 74, 24, entries[current].date);
+        u8g2_DrawStr(&m1_u8g2, 6, 34, entries[current].range);
+        u8g2_DrawStr(&m1_u8g2, 6, 44, entries[current].status);
+        u8g2_DrawStr(&m1_u8g2, 6, 54, entries[current].metrics1);
+        u8g2_DrawStr(&m1_u8g2, 0, 64, "UP/DN BACK");
+        u8g2_DrawStr(&m1_u8g2, 106, 64, footer);
+        m1_u8g2_nextpage();
+
+        ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+        if (ret == pdTRUE && q_item.q_evt_type == Q_EVENT_KEYPAD)
+        {
+            xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+            if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+            {
+                running = false;
+            }
+            else if (this_button_status.event[BUTTON_UP_KP_ID] == BUTTON_EVENT_CLICK)
+            {
+                if (current > 0)
+                    current--;
+            }
+            else if (this_button_status.event[BUTTON_DOWN_KP_ID] == BUTTON_EVENT_CLICK)
+            {
+                if ((current + 1) < entry_count)
+                    current++;
+            }
+        }
+    }
+
+    xQueueReset(main_q_hdl);
+    m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
+}
+
+void sub_ghz_jam_detector(void)
+{
+    S_M1_Buttons_Status this_button_status;
+    S_M1_Main_Q_t q_item;
+    BaseType_t ret;
+    struct si446x_reply_GET_MODEM_STATUS_map *pmodemstat;
+    char line1[32];
+    char line2[32];
+    char line3[32];
+    char line4[32];
+    bool running = true;
+    bool jam_logged = false;
+    uint8_t range_idx = 0;
+    uint8_t suspicious_streak = 0;
+    int16_t avg_rssi;
+    int16_t peak_rssi;
+    int16_t min_rssi;
+    uint8_t busy_bins;
+    uint32_t peak_freq_hz;
+    const char *status_text;
+
+    static const uint32_t scan_centers[] = {
+        307000000UL,
+        370000000UL,
+        435000000UL,
+        915000000UL,
+    };
+    static const uint32_t scan_spans[] = {
+        15000000UL,
+        50000000UL,
+        10000000UL,
+        10000000UL,
+    };
+    static const char *scan_labels[] = {
+        "300-315 MHz",
+        "345-395 MHz",
+        "430-440 MHz",
+        "910-920 MHz",
+    };
+    #define JAM_DETECT_RANGES 4
+
+    menu_sub_ghz_init();
+
+    if (scan_centers[range_idx] >= 850000000UL)
+        radio_init_rx_tx(SUB_GHZ_BAND_915, MODEM_MOD_TYPE_OOK, true);
+    else
+        radio_init_rx_tx(SUB_GHZ_BAND_433, MODEM_MOD_TYPE_OOK, true);
+    radio_set_antenna_mode(RADIO_ANTENNA_MODE_RX);
+
+    while (running)
+    {
+        uint32_t center = scan_centers[range_idx];
+        uint32_t span = scan_spans[range_idx];
+        uint32_t step = span / JAM_DETECT_SAMPLE_BINS;
+        uint32_t freq = center - span / 2;
+        int32_t rssi_sum = 0;
+
+        if (step < 50000UL)
+            step = 50000UL;
+
+        avg_rssi = -127;
+        peak_rssi = -127;
+        min_rssi = 0;
+        busy_bins = 0;
+        peak_freq_hz = freq;
+
+        for (uint8_t i = 0; i < JAM_DETECT_SAMPLE_BINS; i++)
+        {
+            SI446x_Set_Frequency(freq);
+            SI446x_Start_Rx(0);
+            HAL_Delay(2);
+
+            SI446x_Get_IntStatus(0, 0, 0);
+            pmodemstat = SI446x_Get_ModemStatus(0x00);
+
+            int16_t rssi = pmodemstat->CURR_RSSI / 2 - MODEM_RSSI_COMP - 70;
+            rssi_sum += rssi;
+
+            if (i == 0 || rssi < min_rssi)
+                min_rssi = rssi;
+            if (rssi > peak_rssi)
+            {
+                peak_rssi = rssi;
+                peak_freq_hz = freq;
+            }
+            if (rssi >= JAM_DETECT_BUSY_THRESHOLD)
+                busy_bins++;
+
+            freq += step;
+        }
+
+        avg_rssi = (int16_t)(rssi_sum / JAM_DETECT_SAMPLE_BINS);
+
+        if (((avg_rssi >= -85) && (busy_bins >= (JAM_DETECT_SAMPLE_BINS * 2 / 3))) ||
+            ((avg_rssi >= -90) && (busy_bins >= (JAM_DETECT_SAMPLE_BINS * 4 / 5)) && ((peak_rssi - avg_rssi) <= 10)))
+        {
+            if (suspicious_streak < 255)
+                suspicious_streak++;
+        }
+        else if (suspicious_streak > 0)
+        {
+            suspicious_streak--;
+        }
+
+        if (suspicious_streak >= JAM_DETECT_SWEEP_COUNT)
+            status_text = "Possible Jam";
+        else if (busy_bins >= (JAM_DETECT_SAMPLE_BINS / 3) || peak_rssi >= -65)
+            status_text = "Busy";
+        else
+            status_text = "Quiet";
+
+        if ((strcmp(status_text, "Possible Jam") == 0) && !jam_logged)
+        {
+            sub_ghz_jam_log_event(scan_labels[range_idx], status_text, avg_rssi, peak_rssi, busy_bins, peak_freq_hz);
+            jam_logged = true;
+        }
+        else if (strcmp(status_text, "Possible Jam") != 0)
+        {
+            jam_logged = false;
+        }
+
+        snprintf(line1, sizeof(line1), "%s", scan_labels[range_idx]);
+        snprintf(line2, sizeof(line2), "Avg:%ddBm Peak:%ddBm", avg_rssi, peak_rssi);
+        snprintf(line3, sizeof(line3), "Busy:%u/%u Floor:%ddBm", busy_bins, JAM_DETECT_SAMPLE_BINS, min_rssi);
+        snprintf(line4, sizeof(line4), "%s %lu.%03lu", status_text,
+                 peak_freq_hz / 1000000UL, (peak_freq_hz % 1000000UL) / 1000UL);
+
+        u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+        m1_u8g2_firstpage();
+        u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+        u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
+        u8g2_DrawStr(&m1_u8g2, 2, 1 + M1_GUI_FONT_HEIGHT, "Jam Detect");
+        u8g2_DrawFrame(&m1_u8g2, 2, 16, 124, 38);
+        u8g2_DrawStr(&m1_u8g2, 6, 24, line1);
+        u8g2_DrawStr(&m1_u8g2, 6, 34, line2);
+        u8g2_DrawStr(&m1_u8g2, 6, 44, line3);
+        u8g2_DrawStr(&m1_u8g2, 6, 54, line4);
+        u8g2_DrawStr(&m1_u8g2, 0, 64, "L/R:Band OK:Reset BACK");
+        m1_u8g2_nextpage();
+
+        ret = xQueueReceive(main_q_hdl, &q_item, pdMS_TO_TICKS(120));
+        if (ret == pdTRUE && q_item.q_evt_type == Q_EVENT_KEYPAD)
+        {
+            xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+
+            if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+            {
+                running = false;
+            }
+            else if (this_button_status.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+            {
+                range_idx = (range_idx + 1) % JAM_DETECT_RANGES;
+                suspicious_streak = 0;
+                jam_logged = false;
+                if (scan_centers[range_idx] >= 850000000UL)
+                    radio_init_rx_tx(SUB_GHZ_BAND_915, MODEM_MOD_TYPE_OOK, true);
+                else
+                    radio_init_rx_tx(SUB_GHZ_BAND_433, MODEM_MOD_TYPE_OOK, true);
+                radio_set_antenna_mode(RADIO_ANTENNA_MODE_RX);
+            }
+            else if (this_button_status.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
+            {
+                range_idx = (range_idx + JAM_DETECT_RANGES - 1) % JAM_DETECT_RANGES;
+                suspicious_streak = 0;
+                jam_logged = false;
+                if (scan_centers[range_idx] >= 850000000UL)
+                    radio_init_rx_tx(SUB_GHZ_BAND_915, MODEM_MOD_TYPE_OOK, true);
+                else
+                    radio_init_rx_tx(SUB_GHZ_BAND_433, MODEM_MOD_TYPE_OOK, true);
+                radio_set_antenna_mode(RADIO_ANTENNA_MODE_RX);
+            }
+            else if (this_button_status.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK)
+            {
+                suspicious_streak = 0;
+                jam_logged = false;
+            }
+        }
+    }
+
+    radio_set_antenna_mode(RADIO_ANTENNA_MODE_ISOLATED);
+    SI446x_Change_State(SI446X_CMD_CHANGE_STATE_ARG_NEXT_STATE1_NEW_STATE_ENUM_SLEEP);
+    menu_sub_ghz_exit();
+    xQueueReset(main_q_hdl);
+    m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
+}
 
 void sub_ghz_freq_scanner(void)
 {

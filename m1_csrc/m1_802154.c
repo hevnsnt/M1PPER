@@ -28,6 +28,8 @@
 #define SCAN_DWELL_TIME_MS      2000   /* Time per channel in ms */
 #define SCAN_POLL_INTERVAL_MS   50     /* How often to poll SPI for frames */
 #define AT_RESP_BUF_SIZE        512    /* Buffer for AT responses */
+#define IEEE802154_SCAN_ATTEMPTS 2
+#define IEEE802154_RECOVERY_DELAY_MS 400
 
 #define LIST_ITEM_HEIGHT        9
 #define LIST_START_Y            13
@@ -45,6 +47,84 @@ static void draw_title_bar(const char *title)
 {
     u8g2_DrawXBMP(&m1_u8g2, 0, 0, 128, 14, m1_frame_128_14);
     u8g2_DrawStr(&m1_u8g2, 2, 1 + 10, title);
+}
+
+static bool ieee802154_ensure_esp32_ready(void)
+{
+    if (!m1_esp32_get_init_status())
+        m1_esp32_init();
+
+    if (!get_esp32_main_init_status())
+        esp32_main_init();
+
+    return get_esp32_main_init_status();
+}
+
+static void ieee802154_display_panel(const char *title,
+                                     const char *line1,
+                                     const char *line2,
+                                     const char *line3)
+{
+    m1_u8g2_firstpage();
+    u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+    u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+    draw_title_bar(title);
+    u8g2_DrawFrame(&m1_u8g2, 2, 16, 124, 34);
+    if (line1)
+        u8g2_DrawStr(&m1_u8g2, 6, 26, line1);
+    if (line2)
+        u8g2_DrawStr(&m1_u8g2, 6, 36, line2);
+    if (line3)
+        u8g2_DrawStr(&m1_u8g2, 6, 46, line3);
+    m1_u8g2_nextpage();
+}
+
+static void ieee802154_recover_module(void)
+{
+    m1_esp32_deinit();
+    esp32_disable();
+    m1_hard_delay(100);
+    esp32_enable();
+    m1_hard_delay(IEEE802154_RECOVERY_DELAY_MS);
+    ieee802154_ensure_esp32_ready();
+}
+
+static void ieee802154_stop_sniffer(char *resp_buf, size_t resp_buf_size)
+{
+    if (resp_buf && resp_buf_size > 0)
+        resp_buf[0] = '\0';
+
+    spi_AT_send_recv("AT+ZIGSNIFF=0\r\n", resp_buf, (int)resp_buf_size, 2);
+}
+
+static bool ieee802154_start_sniffer(uint8_t ch, char *resp_buf, size_t resp_buf_size)
+{
+    char cmd[24];
+
+    if (resp_buf == NULL || resp_buf_size == 0)
+        return false;
+
+    snprintf(cmd, sizeof(cmd), "AT+ZIGSNIFF=1,%u\r\n", ch);
+
+    for (uint8_t attempt = 0; attempt < IEEE802154_SCAN_ATTEMPTS; attempt++)
+    {
+        resp_buf[0] = '\0';
+        spi_AT_send_recv(cmd, resp_buf, (int)resp_buf_size, 2);
+
+        if (strstr(resp_buf, "ERROR") == NULL && strstr(resp_buf, "SEND_ERR") == NULL)
+            return true;
+
+        if ((attempt + 1U) < IEEE802154_SCAN_ATTEMPTS)
+        {
+            ieee802154_display_panel("802.15.4 Scan",
+                                     "Sniffer start failed",
+                                     "Recovering ESP32...",
+                                     "Retrying now");
+            ieee802154_recover_module();
+        }
+    }
+
+    return false;
 }
 
 static void draw_list_item(uint8_t vis_idx, const char *text, bool selected)
@@ -69,15 +149,7 @@ static void draw_list_item(uint8_t vis_idx, const char *text, bool selected)
 
 static void show_message(const char *title, const char *line1, const char *line2, uint16_t delay_ms)
 {
-    m1_u8g2_firstpage();
-    u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
-    u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
-    draw_title_bar(title);
-    if (line1)
-        u8g2_DrawStr(&m1_u8g2, 2, 28, line1);
-    if (line2)
-        u8g2_DrawStr(&m1_u8g2, 2, 40, line2);
-    m1_u8g2_nextpage();
+    ieee802154_display_panel(title, line1, line2, NULL);
     if (delay_ms)
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
 }
@@ -269,7 +341,7 @@ static void device_detail_screen(const char *title, ieee802154_device_t *dev)
             snprintf(prn_msg, sizeof(prn_msg), "%s (%u)", dev->frame_types, dev->frame_count);
             u8g2_DrawStr(&m1_u8g2, 2, y, prn_msg);
 
-            m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "OK", arrowright_8x8);
+            m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "", NULL);
             m1_u8g2_nextpage();
         }
 
@@ -278,9 +350,7 @@ static void device_detail_screen(const char *title, ieee802154_device_t *dev)
         {
             xQueueReceive(button_events_q_hdl, &this_button_status, 0);
             if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK
-             || this_button_status.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK
-             || this_button_status.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK
-             || this_button_status.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+             || this_button_status.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
             {
                 break;
             }
@@ -308,22 +378,14 @@ static void ieee802154_scan(char filter_proto)
 
     s_device_count = 0;
     memset(s_devices, 0, sizeof(s_devices));
+    xQueueReset(main_q_hdl);
 
     /* Init ESP32 if needed */
     u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
-    if (!m1_esp32_get_init_status())
+    ieee802154_display_panel(title, "Initializing...", "Preparing ESP32-C6", NULL);
+    if (!ieee802154_ensure_esp32_ready())
     {
-        m1_esp32_init();
-    }
-    if (!get_esp32_main_init_status())
-    {
-        show_message(title, "Initializing...", NULL, 0);
-        esp32_main_init();
-    }
-
-    if (!get_esp32_main_init_status())
-    {
-        show_message(title, "ESP32 not ready!", "Press Back", 0);
+        ieee802154_display_panel(title, "ESP32 not ready", "Press BACK to exit", NULL);
         goto wait_exit;
     }
 
@@ -332,9 +394,6 @@ static void ieee802154_scan(char filter_proto)
     /* Scan all 16 channels (11-26) */
     for (uint8_t ch = 11; ch <= 26; ch++)
     {
-        char cmd[24];
-        snprintf(cmd, sizeof(cmd), "AT+ZIGSNIFF=1,%u\r\n", ch);
-
         /* Show scanning progress */
         m1_u8g2_firstpage();
         u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
@@ -354,21 +413,15 @@ static void ieee802154_scan(char filter_proto)
         m1_u8g2_nextpage();
 
         /* Start/switch channel */
-        spi_AT_send_recv(cmd, resp_buf, sizeof(resp_buf), 5);
-
-        /* Check first channel response for errors */
-        if (ch == 11)
+        if (!ieee802154_start_sniffer(ch, resp_buf, sizeof(resp_buf)))
         {
-            if (strstr(resp_buf, "ERROR") || strstr(resp_buf, "TIMEOUT") || strstr(resp_buf, "SEND_ERR"))
-            {
-                char err_msg[44];
-                strncpy(err_msg, resp_buf, 40);
-                err_msg[40] = '\0';
-                for (int i = 0; err_msg[i]; i++)
-                    if (err_msg[i] == '\r' || err_msg[i] == '\n') err_msg[i] = ' ';
-                show_message(title, "ZIGSNIFF error:", err_msg, 0);
-                goto wait_exit;
-            }
+            char err_msg[44];
+            strncpy(err_msg, resp_buf, 40);
+            err_msg[40] = '\0';
+            for (int i = 0; err_msg[i]; i++)
+                if (err_msg[i] == '\r' || err_msg[i] == '\n') err_msg[i] = ' ';
+            ieee802154_display_panel(title, "Sniffer start failed", err_msg, "BACK to exit");
+            goto wait_exit;
         }
 
         /* Dwell on this channel and collect frames */
@@ -392,13 +445,12 @@ static void ieee802154_scan(char filter_proto)
                 {
                     xQueueReceive(button_events_q_hdl, &this_button_status, 0);
                     if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK
-                     || this_button_status.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK
-                     || this_button_status.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK
-                     || this_button_status.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+                     || this_button_status.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
                     {
                         /* Stop sniffer and exit */
-                        spi_AT_send_recv("AT+ZIGSNIFF=0\r\n", resp_buf, sizeof(resp_buf), 5);
+                        ieee802154_stop_sniffer(resp_buf, sizeof(resp_buf));
                         xQueueReset(main_q_hdl);
+                        m1_esp32_deinit();
                         return;
                     }
                 }
@@ -407,14 +459,14 @@ static void ieee802154_scan(char filter_proto)
     }
 
     /* Stop sniffer */
-    spi_AT_send_recv("AT+ZIGSNIFF=0\r\n", resp_buf, sizeof(resp_buf), 5);
+    ieee802154_stop_sniffer(resp_buf, sizeof(resp_buf));
     scan_done = true;
 
     if (!scan_done || s_device_count == 0)
     {
         char diag[32];
         snprintf(diag, sizeof(diag), "SPI data: %d bytes", total_poll_bytes);
-        show_message(title, "No devices found", diag, 0);
+        ieee802154_display_panel(title, "No devices found", diag, "OK retry BACK exit");
         goto wait_exit;
     }
 
@@ -493,6 +545,7 @@ static void ieee802154_scan(char filter_proto)
     }
 
     xQueueReset(main_q_hdl);
+    m1_esp32_deinit();
     return;
 
 wait_exit:
@@ -503,15 +556,22 @@ wait_exit:
         {
             xQueueReceive(button_events_q_hdl, &this_button_status, 0);
             if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK
-             || this_button_status.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK
-             || this_button_status.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK
-             || this_button_status.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+             || this_button_status.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
                 break;
+            if (this_button_status.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK)
+            {
+                ieee802154_stop_sniffer(resp_buf, sizeof(resp_buf));
+                xQueueReset(main_q_hdl);
+                m1_esp32_deinit();
+                ieee802154_scan(filter_proto);
+                return;
+            }
         }
     }
     /* Stop sniffer just in case */
-    spi_AT_send_recv("AT+ZIGSNIFF=0\r\n", resp_buf, sizeof(resp_buf), 5);
+    ieee802154_stop_sniffer(resp_buf, sizeof(resp_buf));
     xQueueReset(main_q_hdl);
+    m1_esp32_deinit();
 }
 
 /********************* P U B L I C   E N T R Y   P O I N T S *****************/

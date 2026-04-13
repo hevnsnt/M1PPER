@@ -89,6 +89,7 @@
 #define RPC_CMD_CLI_RESP        0x61
 #define RPC_CMD_ESP_UART_SNOOP  0x62
 #define RPC_CMD_ESP_UART_SNOOP_RESP 0x63
+#define RPC_CMD_DEBUG_LOG       0x64    /* Unsolicited debug log text from firmware */
 
 /* ── Button IDs (match m1_system.h) ── */
 #define RPC_BUTTON_OK           0
@@ -240,6 +241,7 @@ bool m1_rpc_screen_streaming_active(void);
  */
 void m1_rpc_send_frame(uint8_t cmd, uint8_t seq,
                        const uint8_t *payload, uint16_t len);
+void m1_rpc_send_debug_log(const char *text, uint16_t len);
 
 /**
  * @brief  Send ACK response.

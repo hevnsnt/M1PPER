@@ -768,14 +768,15 @@ static uint8_t bl_flash_binary(uint8_t *payload, size_t size)
     M1_LOG_I(M1_LOGDB_TAG, "\r\nFlashing completed!\r\n");
     init_done = false; // reset
 
-    write_acc -= FW_IMAGE_CRC_SIZE; // exclude the CRC at the end of the image file
-    write_acc /= 4; // convert image size from byte to word (32-bit)
-    err = bl_crc_check(write_acc);
-
-	if (err != BL_CODE_OK)
+    /* Verify the flashed image using the CRC extension block (magic + size + CRC).
+     * bl_verify_bank_crc() reads the correct offsets and uses ECC-safe reads.
+     * The old bl_crc_check() read CRC from FW_CRC_ADDRESS which now holds the
+     * magic sentinel, causing every update to fail CRC verification. */
+    if (!bl_verify_bank_crc(FW_START_ADDRESS + M1_FLASH_BANK_SIZE))
     {
-        M1_LOG_I(M1_LOGDB_TAG, "CRC not matched.\r\n");
-        return err;
+        M1_LOG_E(M1_LOGDB_TAG, "CRC not matched (bank2 @ 0x%08lX).\r\n",
+                 (uint32_t)(FW_START_ADDRESS + M1_FLASH_BANK_SIZE));
+        return BL_CODE_CHK_ERROR;
     }
     M1_LOG_I(M1_LOGDB_TAG, "Flash verified.\r\n");
 

@@ -1,0 +1,15 @@
+REM Universal hello world - works on any OS with a text editor open
+REM Open any text editor first, then run this payload
+DEFAULT_DELAY 50
+DELAY 1000
+STRING Hello from the M1 T-1000!
+ENTER
+STRING This is a BadUSB payload running via DuckyScript.
+ENTER
+STRING The device is emulating a USB keyboard.
+ENTER
+ENTER
+STRING Supported commands: STRING, DELAY, GUI, CTRL, ALT, SHIFT
+ENTER
+STRING and all standard keyboard keys (ENTER, TAB, F1-F12, etc.)
+ENTER

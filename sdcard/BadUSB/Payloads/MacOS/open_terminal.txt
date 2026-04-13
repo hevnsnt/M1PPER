@@ -1,0 +1,11 @@
+REM Open Terminal on macOS and run a command
+DEFAULT_DELAY 100
+DELAY 500
+COMMAND SPACE
+DELAY 800
+STRING Terminal
+DELAY 500
+ENTER
+DELAY 2000
+STRING echo "Hello from M1 BadUSB on macOS!"
+ENTER

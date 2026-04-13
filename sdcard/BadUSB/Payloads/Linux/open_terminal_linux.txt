@@ -1,0 +1,7 @@
+REM Open terminal on Linux (Ctrl+Alt+T) and run a command
+DEFAULT_DELAY 100
+DELAY 500
+CTRL ALT t
+DELAY 2000
+STRING echo "Hello from M1 BadUSB on Linux!"
+ENTER

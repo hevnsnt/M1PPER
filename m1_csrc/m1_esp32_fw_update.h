@@ -53,5 +53,6 @@ void setting_esp32_xkey_handler(S_M1_Key_Event event, uint8_t button_id, uint8_t
 void setting_esp32_image_file(void);
 void setting_esp32_start_address(void);
 void setting_esp32_firmware_update(void);
+void setting_esp32_c6_reset(void);
 
 #endif /* M1_ESP32_FW_UPDATE_H_ */

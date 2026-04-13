@@ -21,6 +21,7 @@
 //#include "m1_nfc.h"
 #include "nfc_driver.h"
 #include "m1_compile_cfg.h"
+#include "m1_menu.h"
 #ifdef M1_APP_RPC_ENABLE
 #include "m1_rpc.h"
 #endif
@@ -246,4 +247,3 @@ void m1_runonce_task_handler(void *param)
 	//m1_led_indicator_on(NULL);
 	vTaskDelete(NULL); // Delete this task
 } // void m1_runonce_task_handler(void *param)
-

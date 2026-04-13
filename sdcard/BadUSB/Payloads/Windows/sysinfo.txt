@@ -1,0 +1,10 @@
+REM Open CMD and display system info
+DEFAULT_DELAY 100
+DELAY 500
+GUI r
+DELAY 800
+STRING cmd
+ENTER
+DELAY 1500
+STRING systeminfo | findstr /B /C:"OS Name" /C:"OS Version" /C:"System Type"
+ENTER

@@ -149,6 +149,8 @@ void sub_ghz_spectrum_analyzer(void);
 void sub_ghz_weather_station(void);
 void sub_ghz_brute_force(void);
 void sub_ghz_rssi_meter(void);
+void sub_ghz_jam_detector(void);
+void sub_ghz_jam_log_viewer(void);
 void sub_ghz_freq_scanner(void);
 void sub_ghz_read(void);
 void sub_ghz_saved(void);

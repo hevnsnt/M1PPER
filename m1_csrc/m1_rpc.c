@@ -354,6 +354,20 @@ void m1_rpc_send_frame(uint8_t cmd, uint8_t seq,
 
 
 /**
+ * @brief  Send debug log text to the desktop app as an RPC frame.
+ *         Unsolicited — no sequence number tracking needed.
+ */
+void m1_rpc_send_debug_log(const char *text, uint16_t len)
+{
+    if (!text || len == 0)
+        return;
+    if (len > 512)
+        len = 512; /* cap to avoid flooding */
+    m1_rpc_send_frame(RPC_CMD_DEBUG_LOG, 0, (const uint8_t *)text, len);
+}
+
+
+/**
  * @brief  Send an ACK response.
  */
 void m1_rpc_send_ack(uint8_t seq)
@@ -1935,6 +1949,11 @@ static void rpc_handle_esp_update_start(const S_RPC_Frame *f)
         .port_rst   = ESP32_EN_GPIO_Port,
         .pin_num_rst = ESP32_EN_Pin,
     };
+    /* Deinitialize SPI AT session and reset ESP32 (like mtest 79 0) */
+    m1_esp32_deinit();
+    esp32_enable();
+    HAL_Delay(100);  /* Let ESP32 stabilize after power cycle */
+
     loader_port_stm32_init(&config);
     esp32_UART_init();
 

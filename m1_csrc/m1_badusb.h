@@ -27,12 +27,21 @@ typedef struct
     char     last_line[BADUSB_MAX_LINE_LEN];
 } badusb_state_t;
 
-/* Menu entry point */
+/* Main menu entry point (3-item submenu: Run Script, Payload Library, OS Detect) */
+void badusb_main_menu(void);
+
+/* File browser entry point (also called from main menu as "Run Script") */
 void badusb_run(void);
 
 /* Script execution API */
 bool badusb_execute_file(const char *filepath);
 void badusb_stop(void);
+
+/* OS fingerprinting */
+void badusb_os_detect(void);
+
+/* Payload library browser */
+void badusb_payload_library(void);
 
 /* Keyboard emulation API for external apps */
 void badusb_send_key(uint8_t modifier, uint8_t keycode);

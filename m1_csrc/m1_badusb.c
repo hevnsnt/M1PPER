@@ -21,6 +21,7 @@
 #include "m1_sdcard.h"
 #include "m1_compile_cfg.h"
 #include "m1_badusb.h"
+#include "m1_badusb_fingerprint.h"
 #include "usbd_hid.h"
 #include "m1_log_debug.h"
 #include <string.h>
@@ -981,6 +982,526 @@ void badusb_run(void)
 
             /* Return to file browser */
             m1_fb_display(NULL);
+        }
+    }
+}
+
+/*============================================================================*/
+/**
+  * @brief  OS Detect — switch to HID, capture enumeration, analyze, show result
+  */
+/*============================================================================*/
+void badusb_os_detect(void)
+{
+    S_M1_Buttons_Status btn;
+    S_M1_Main_Q_t q_item;
+    BaseType_t ret;
+
+    /* Show "connecting" screen */
+    m1_u8g2_firstpage();
+    u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+    u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+    m1_draw_text(&m1_u8g2, 2, 14, 124, "OS Detect", TEXT_ALIGN_CENTER);
+    m1_draw_text(&m1_u8g2, 2, 30, 124, "Switching to", TEXT_ALIGN_CENTER);
+    m1_draw_text(&m1_u8g2, 2, 42, 124, "HID mode...", TEXT_ALIGN_CENTER);
+    m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "", arrowright_8x8);
+    m1_u8g2_nextpage();
+
+    /* Switch USB to HID — this triggers USBD_HID_Init which starts capture */
+    USBD_HID_ResetDbgCounters();
+    m1_usb_switch_to_hid();
+
+    /* Wait for enumeration */
+    uint32_t t0 = osKernelGetTickCount();
+    bool enumerated = false;
+
+    while ((osKernelGetTickCount() - t0) < BADUSB_ENUM_TIMEOUT_MS)
+    {
+        if (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED)
+        {
+            enumerated = true;
+            break;
+        }
+
+        /* Check for abort */
+        if (xQueueReceive(main_q_hdl, &q_item, 0) == pdTRUE)
+        {
+            if (q_item.q_evt_type == Q_EVENT_KEYPAD)
+            {
+                if (xQueueReceive(button_events_q_hdl, &btn, 0) == pdTRUE)
+                {
+                    if (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+                        btn.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
+                    {
+                        m1_usb_switch_to_normal();
+                        return;
+                    }
+                }
+            }
+        }
+
+        osDelay(BADUSB_ENUM_POLL_MS);
+    }
+
+    if (!enumerated)
+    {
+        m1_usb_switch_to_normal();
+        m1_message_box(&m1_u8g2, "OS Detect", "No host", "detected", " OK ");
+        return;
+    }
+
+    /* Wait a bit for the host to send all its Setup requests */
+    osDelay(2000);
+
+    /* Analyze the captured fingerprint */
+    badusb_os_t os = hid_fp_analyze();
+
+    /* Switch back to normal USB before showing result */
+    m1_usb_switch_to_normal();
+
+    /* Display result */
+    char detail[48];
+    snprintf(detail, sizeof(detail), "Events: %d", g_hid_fingerprint.count);
+
+    m1_u8g2_firstpage();
+    u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+    u8g2_SetFont(&m1_u8g2, M1_DISP_RUN_MENU_FONT_B);
+    m1_draw_text(&m1_u8g2, 2, 14, 124, "OS Detected", TEXT_ALIGN_CENTER);
+    u8g2_SetFont(&m1_u8g2, M1_DISP_LARGE_FONT_3B);
+    m1_draw_text(&m1_u8g2, 2, 36, 124, hid_fp_os_name(os), TEXT_ALIGN_CENTER);
+    u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+    m1_draw_text(&m1_u8g2, 2, 50, 124, detail, TEXT_ALIGN_CENTER);
+    m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "", arrowright_8x8);
+    m1_u8g2_nextpage();
+
+    /* Wait for user to dismiss */
+    while (1)
+    {
+        ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+        if (ret != pdTRUE) continue;
+        if (q_item.q_evt_type != Q_EVENT_KEYPAD) continue;
+
+        ret = xQueueReceive(button_events_q_hdl, &btn, 0);
+        if (ret != pdTRUE) continue;
+
+        if (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+            btn.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK ||
+            btn.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            break;
+        }
+    }
+}
+
+
+/*============================================================================*/
+/**
+  * @brief  Draw a simple list menu on screen (self-contained, no shared state)
+  * @param  title: header text
+  * @param  items: array of item strings
+  * @param  count: number of items
+  * @param  sel: currently selected index
+  */
+/*============================================================================*/
+static void badusb_draw_list(const char *title, const char *items[],
+                             uint8_t count, uint8_t sel)
+{
+    m1_u8g2_firstpage();
+    u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+
+    /* Title bar */
+    u8g2_SetFont(&m1_u8g2, M1_DISP_RUN_MENU_FONT_B);
+    m1_draw_text(&m1_u8g2, 2, 10, 124, title, TEXT_ALIGN_CENTER);
+
+    /* List items */
+    u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+    uint8_t y = 24;
+    uint8_t max_visible = 3;  /* 128x64 display: ~3 items below title */
+
+    /* Compute scroll window */
+    uint8_t top = 0;
+    if (sel >= max_visible)
+        top = sel - max_visible + 1;
+    if (top + max_visible > count)
+    {
+        if (count > max_visible)
+            top = count - max_visible;
+        else
+            top = 0;
+    }
+
+    for (uint8_t i = top; i < count && (i - top) < max_visible; i++)
+    {
+        if (i == sel)
+        {
+            /* Draw selection highlight */
+            u8g2_DrawBox(&m1_u8g2, 0, y - 9, 128, 12);
+            u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_BG);
+            m1_draw_text(&m1_u8g2, 4, y, 120, items[i], TEXT_ALIGN_LEFT);
+            u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+        }
+        else
+        {
+            m1_draw_text(&m1_u8g2, 4, y, 120, items[i], TEXT_ALIGN_LEFT);
+        }
+        y += 13;
+    }
+
+    m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "OK", arrowright_8x8);
+    m1_u8g2_nextpage();
+}
+
+
+/*============================================================================*/
+/**
+  * @brief  Payload Library — browse categorized payloads on SD card
+  *
+  * Directory structure:
+  *   0:/BadUSB/Payloads/Windows/
+  *   0:/BadUSB/Payloads/MacOS/
+  *   0:/BadUSB/Payloads/Linux/
+  *   0:/BadUSB/Payloads/Universal/
+  *
+  * Each .txt script can have a .desc sidecar with a one-line description.
+  */
+/*============================================================================*/
+
+#define PAYLOAD_BASE_DIR      "0:/BadUSB/Payloads"
+#define PAYLOAD_NUM_CATS      4
+#define PAYLOAD_DESC_MAXLEN   64
+#define PAYLOAD_MAX_FILES     16
+#define PAYLOAD_NAME_MAX      32
+
+static const char *payload_categories[PAYLOAD_NUM_CATS] = {
+    "Windows", "MacOS", "Linux", "Universal"
+};
+
+static const char *payload_cat_dirs[PAYLOAD_NUM_CATS] = {
+    PAYLOAD_BASE_DIR "/Windows",
+    PAYLOAD_BASE_DIR "/MacOS",
+    PAYLOAD_BASE_DIR "/Linux",
+    PAYLOAD_BASE_DIR "/Universal"
+};
+
+/* Ensure all payload directories exist (creates parents first) */
+static void payload_ensure_dirs(void)
+{
+    f_mkdir(BADUSB_DIR);
+    f_mkdir(PAYLOAD_BASE_DIR);
+    for (int i = 0; i < PAYLOAD_NUM_CATS; i++)
+        f_mkdir(payload_cat_dirs[i]);
+}
+
+/* Scan a directory for .txt files, return count.
+   Names stored in names[], full paths in paths[]. */
+static uint8_t payload_scan_dir(const char *dir,
+                                char names[][PAYLOAD_NAME_MAX],
+                                char paths[][128],
+                                uint8_t max_files)
+{
+    DIR d;
+    FILINFO fno;
+    FRESULT res;
+    uint8_t count = 0;
+
+    res = f_opendir(&d, dir);
+    if (res != FR_OK)
+        return 0;
+
+    while (count < max_files)
+    {
+        res = f_readdir(&d, &fno);
+        if (res != FR_OK || fno.fname[0] == '\0')
+            break;
+
+        if (fno.fattrib & AM_DIR)
+            continue;
+
+        uint16_t nlen = (uint16_t)strlen(fno.fname);
+        if (nlen < 5)
+            continue;
+
+        /* Check for .txt extension */
+        const char *ext = &fno.fname[nlen - 4];
+        if (strcmp(ext, ".txt") != 0 && strcmp(ext, ".TXT") != 0)
+            continue;
+
+        /* Store display name (without .txt) */
+        uint16_t copy_len = nlen - 4;
+        if (copy_len >= PAYLOAD_NAME_MAX)
+            copy_len = PAYLOAD_NAME_MAX - 1;
+        strncpy(names[count], fno.fname, copy_len);
+        names[count][copy_len] = '\0';
+
+        /* Store full path */
+        snprintf(paths[count], 128, "%s/%s", dir, fno.fname);
+
+        count++;
+    }
+    f_closedir(&d);
+    return count;
+}
+
+/* Read a .desc sidecar file (replace .txt → .desc). Returns empty string on failure. */
+static void payload_read_desc(const char *txt_path, char *desc_out, uint8_t max_len)
+{
+    char desc_path[132];
+    desc_out[0] = '\0';
+
+    strncpy(desc_path, txt_path, sizeof(desc_path) - 1);
+    desc_path[sizeof(desc_path) - 1] = '\0';
+
+    char *dot = strrchr(desc_path, '.');
+    if (!dot)
+        return;
+    if (strcmp(dot, ".txt") != 0 && strcmp(dot, ".TXT") != 0)
+        return;
+
+    strcpy(dot, ".desc");
+
+    FIL fp;
+    if (f_open(&fp, desc_path, FA_READ) != FR_OK)
+        return;
+
+    UINT br;
+    f_read(&fp, desc_out, max_len - 1, &br);
+    f_close(&fp);
+    desc_out[br] = '\0';
+
+    char *nl = strchr(desc_out, '\n');
+    if (nl) *nl = '\0';
+    nl = strchr(desc_out, '\r');
+    if (nl) *nl = '\0';
+}
+
+void badusb_payload_library(void)
+{
+    S_M1_Buttons_Status btn;
+    S_M1_Main_Q_t q_item;
+    BaseType_t ret;
+    uint8_t sel = 0;
+
+    /* Create directory structure (parents first) */
+    payload_ensure_dirs();
+
+    /* Drain stale events */
+    while (xQueueReceive(main_q_hdl, &q_item, 0) == pdTRUE)
+    {
+        if (q_item.q_evt_type == Q_EVENT_KEYPAD)
+            xQueueReceive(button_events_q_hdl, &btn, 0);
+    }
+
+    badusb_draw_list("Payloads", payload_categories, PAYLOAD_NUM_CATS, sel);
+
+    while (1)
+    {
+        ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+        if (ret != pdTRUE) continue;
+        if (q_item.q_evt_type != Q_EVENT_KEYPAD) continue;
+
+        ret = xQueueReceive(button_events_q_hdl, &btn, 0);
+        if (ret != pdTRUE) continue;
+
+        if (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+            btn.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            break;
+        }
+        else if (btn.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK ||
+                 btn.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            /* Scan the selected category directory for .txt files */
+            static char pl_names[PAYLOAD_MAX_FILES][PAYLOAD_NAME_MAX];
+            static char pl_paths[PAYLOAD_MAX_FILES][128];
+            uint8_t pl_count = payload_scan_dir(payload_cat_dirs[sel],
+                                                 pl_names, pl_paths,
+                                                 PAYLOAD_MAX_FILES);
+
+            if (pl_count == 0)
+            {
+                m1_message_box(&m1_u8g2, payload_categories[sel],
+                               "No payloads", "found", " OK ");
+                badusb_draw_list("Payloads", payload_categories, PAYLOAD_NUM_CATS, sel);
+                continue;
+            }
+
+            /* Build a string pointer array for badusb_draw_list */
+            const char *pl_display[PAYLOAD_MAX_FILES];
+            for (uint8_t i = 0; i < pl_count; i++)
+                pl_display[i] = pl_names[i];
+
+            uint8_t pl_sel = 0;
+            badusb_draw_list(payload_categories[sel], pl_display, pl_count, pl_sel);
+
+            bool in_cat = true;
+            while (in_cat)
+            {
+                ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+                if (ret != pdTRUE) continue;
+                if (q_item.q_evt_type != Q_EVENT_KEYPAD) continue;
+
+                ret = xQueueReceive(button_events_q_hdl, &btn, 0);
+                if (ret != pdTRUE) continue;
+
+                if (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+                    btn.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
+                {
+                    in_cat = false;
+                }
+                else if (btn.event[BUTTON_UP_KP_ID] == BUTTON_EVENT_CLICK)
+                {
+                    if (pl_sel == 0) pl_sel = pl_count - 1; else pl_sel--;
+                    badusb_draw_list(payload_categories[sel], pl_display, pl_count, pl_sel);
+                }
+                else if (btn.event[BUTTON_DOWN_KP_ID] == BUTTON_EVENT_CLICK)
+                {
+                    pl_sel++;
+                    if (pl_sel >= pl_count) pl_sel = 0;
+                    badusb_draw_list(payload_categories[sel], pl_display, pl_count, pl_sel);
+                }
+                else if (btn.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK ||
+                         btn.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+                {
+                    /* Read .desc sidecar if available */
+                    char desc_line[PAYLOAD_DESC_MAXLEN];
+                    payload_read_desc(pl_paths[pl_sel], desc_line, PAYLOAD_DESC_MAXLEN);
+
+                    /* Show payload info + confirm */
+                    m1_u8g2_firstpage();
+                    u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+                    u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+                    m1_draw_text(&m1_u8g2, 2, 10, 124, "Run Payload?", TEXT_ALIGN_CENTER);
+                    m1_draw_text(&m1_u8g2, 2, 24, 124, pl_names[pl_sel], TEXT_ALIGN_CENTER);
+                    if (desc_line[0] != '\0')
+                    {
+                        char disp_desc[28];
+                        strncpy(disp_desc, desc_line, sizeof(disp_desc) - 1);
+                        disp_desc[sizeof(disp_desc) - 1] = '\0';
+                        m1_draw_text(&m1_u8g2, 2, 38, 124, disp_desc, TEXT_ALIGN_CENTER);
+                    }
+                    m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "Run", arrowright_8x8);
+                    m1_u8g2_nextpage();
+
+                    bool confirmed = false;
+                    while (1)
+                    {
+                        ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+                        if (ret != pdTRUE) continue;
+                        if (q_item.q_evt_type != Q_EVENT_KEYPAD) continue;
+
+                        ret = xQueueReceive(button_events_q_hdl, &btn, 0);
+                        if (ret != pdTRUE) continue;
+
+                        if (btn.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK ||
+                            btn.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+                        {
+                            confirmed = true;
+                            break;
+                        }
+                        if (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+                            btn.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
+                        {
+                            break;
+                        }
+                    }
+
+                    if (confirmed)
+                    {
+                        bool ok = badusb_execute_file(pl_paths[pl_sel]);
+                        if (ok)
+                            m1_message_box(&m1_u8g2, "Payload", "Script", "complete", " OK ");
+                        else
+                            m1_message_box(&m1_u8g2, "Payload", "Script", "error", " OK ");
+                    }
+
+                    /* Redraw file list */
+                    badusb_draw_list(payload_categories[sel], pl_display, pl_count, pl_sel);
+                }
+            }
+
+            /* Return to category picker */
+            badusb_draw_list("Payloads", payload_categories, PAYLOAD_NUM_CATS, sel);
+        }
+        else if (btn.event[BUTTON_UP_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            if (sel == 0) sel = PAYLOAD_NUM_CATS - 1; else sel--;
+            badusb_draw_list("Payloads", payload_categories, PAYLOAD_NUM_CATS, sel);
+        }
+        else if (btn.event[BUTTON_DOWN_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            sel++;
+            if (sel >= PAYLOAD_NUM_CATS) sel = 0;
+            badusb_draw_list("Payloads", payload_categories, PAYLOAD_NUM_CATS, sel);
+        }
+    }
+}
+
+
+/*============================================================================*/
+/**
+  * @brief  BadUSB main menu — 3-item submenu (self-contained display)
+  */
+/*============================================================================*/
+
+#define BADUSB_MENU_COUNT  3
+
+static const char *badusb_menu_items[BADUSB_MENU_COUNT] = {
+    "Run Script", "Payload Library", "OS Detect"
+};
+
+void badusb_main_menu(void)
+{
+    S_M1_Buttons_Status btn;
+    S_M1_Main_Q_t q_item;
+    BaseType_t ret;
+    uint8_t sel = 0;
+
+    /* Drain stale events */
+    while (xQueueReceive(main_q_hdl, &q_item, 0) == pdTRUE)
+    {
+        if (q_item.q_evt_type == Q_EVENT_KEYPAD)
+            xQueueReceive(button_events_q_hdl, &btn, 0);
+    }
+
+    badusb_draw_list("BadUSB", badusb_menu_items, BADUSB_MENU_COUNT, sel);
+
+    while (1)
+    {
+        ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+        if (ret != pdTRUE) continue;
+        if (q_item.q_evt_type != Q_EVENT_KEYPAD) continue;
+
+        ret = xQueueReceive(button_events_q_hdl, &btn, 0);
+        if (ret != pdTRUE) continue;
+
+        if (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+            btn.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            break;
+        }
+        else if (btn.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK ||
+                 btn.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            switch (sel)
+            {
+                case 0: badusb_run();             break;
+                case 1: badusb_payload_library();  break;
+                case 2: badusb_os_detect();        break;
+                default: break;
+            }
+            /* Redraw our menu after returning */
+            badusb_draw_list("BadUSB", badusb_menu_items, BADUSB_MENU_COUNT, sel);
+        }
+        else if (btn.event[BUTTON_UP_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            if (sel == 0) sel = BADUSB_MENU_COUNT - 1; else sel--;
+            badusb_draw_list("BadUSB", badusb_menu_items, BADUSB_MENU_COUNT, sel);
+        }
+        else if (btn.event[BUTTON_DOWN_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            sel++;
+            if (sel >= BADUSB_MENU_COUNT) sel = 0;
+            badusb_draw_list("BadUSB", badusb_menu_items, BADUSB_MENU_COUNT, sel);
         }
     }
 }

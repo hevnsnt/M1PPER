@@ -1,32 +1,35 @@
-# STM32CubeIDE generated files
+# Build output
+build/
+artifacts/
+out/
+Release/
 Debug/
-Release/*.o
-Release/*.d
-Release/*.su
-Release/*.cyclo
-*.launch
-
-# Build files
+CMakeFiles/
+compile_commands.json
 *.o
 *.d
 *.su
+*.cyclo
 
-# IDE specific files
+# IDE / editor
+.cache/
+.settings/
+.cproject
+.project
+.mxproject
+*.launch
 *.swp
 *.swo
 *~
 
-# Dependencies
-Drivers/*.o
-Drivers/*.d
-Drivers/*.su
-Drivers/*.cyclo
-Middlewares/*.o
-Middlewares/*.d
-Middlewares/*.su
-Middlewares/*.cyclo
+# STM32CubeMX (no longer used)
+*.ioc
 
-# Documentation
+# System files
+.DS_Store
+Thumbs.db
+
+# Documentation binaries
 *.pdf
 *.doc
 *.docx
@@ -43,23 +46,7 @@ logs/
 *.bak
 *.backup
 
-# System files
-.DS_Store
-Thumbs.db
-
-# Build output (contains machine-specific paths)
-out/
-
-# Generated compile database (contains local paths)
-compile_commands.json
-build/
-/.cache
-/artifacts
-
-# CMake generated files
-CMakeFiles/
-
-# Build helper scripts (contain machine-specific paths)
+# Build helper scripts (machine-specific)
 do_build.ps1
 build.bat
 build_out.txt

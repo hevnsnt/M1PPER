@@ -39,6 +39,9 @@
 #include "m1_flipper_integration.h"
 #endif
 
+#include "m1_branding.h"
+#include "m1_main_menu.h"
+
 /*************************** D E F I N E S ************************************/
 
 //************************** C O N S T A N T **********************************/
@@ -97,6 +100,16 @@ S_M1_Menu_t menu_Sub_GHz_FreqScanner =
     "Freq Scanner", sub_ghz_freq_scanner, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
+S_M1_Menu_t menu_Sub_GHz_JamDetector =
+{
+    "Jam Detect", sub_ghz_jam_detector, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
+S_M1_Menu_t menu_Sub_GHz_JamLog =
+{
+    "Jam Log", sub_ghz_jam_log_viewer, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
 S_M1_Menu_t menu_Sub_GHz_Read =
 {
     "Read", sub_ghz_read, NULL, NULL, 0, 0, NULL, NULL, NULL
@@ -114,11 +127,11 @@ S_M1_Menu_t menu_Sub_GHz_AddManually =
 
 S_M1_Menu_t menu_Sub_GHz =
 {
-    "Sub-GHz", NULL, NULL, NULL, 11, 0, menu_m1_icon_wave, NULL,
+    "Sub-GHz", NULL, NULL, NULL, 13, 0, menu_m1_icon_wave, NULL,
     {&menu_Sub_GHz_Record, &menu_Sub_GHz_Saved,
      &menu_Sub_GHz_AddManually,
      &menu_Sub_GHz_Frequency_Reader, &menu_Sub_GHz_Spectrum, &menu_Sub_GHz_RSSI,
-     &menu_Sub_GHz_FreqScanner, &menu_Sub_GHz_Weather,
+     &menu_Sub_GHz_FreqScanner, &menu_Sub_GHz_JamDetector, &menu_Sub_GHz_JamLog, &menu_Sub_GHz_Weather,
      &menu_Sub_GHz_BruteForce, &menu_Sub_GHz_Regional_Information, &menu_Sub_GHz_Radio_Settings}
 };
 
@@ -342,21 +355,16 @@ S_M1_Menu_t menu_Setting_ESP32_Firmware_Update =
     "Firmware Update", setting_esp32_firmware_update, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
+S_M1_Menu_t menu_Setting_ESP32_C6_Reset =
+{
+    "ESP32-C6 Reset", setting_esp32_c6_reset, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
 /*---------------------- > Settings-ESP32 Update-End ----------------------*/
 
 S_M1_Menu_t menu_Settings_LCD_and_Notifications =
 {
     "LCD and Notifications", settings_lcd_and_notifications, NULL, NULL, 0, 0, NULL, NULL, NULL
-};
-
-S_M1_Menu_t menu_Settings_Storage =
-{
-    "Storage", menu_setting_storage_init, NULL, NULL, 5, 0, NULL, NULL, {&menu_Setting_Storage_About, &menu_Setting_Storage_Explore, &menu_Setting_Storage_Mount, &menu_Setting_Storage_Unmount, &menu_Setting_Storage_Format}
-};
-
-S_M1_Menu_t menu_Settings_Power =
-{
-    "Power", menu_setting_power_init, NULL, NULL, 3, 0, NULL, NULL, {&menu_Setting_Power_Info, &menu_Setting_Power_Reboot, &menu_Setting_Power_Off}
 };
 
 S_M1_Menu_t menu_Settings_System =
@@ -371,18 +379,12 @@ S_M1_Menu_t menu_Setting_Firmware_Update =
 
 S_M1_Menu_t menu_Setting_ESP32 =
 {
-    "ESP32 update", setting_esp32_init, setting_esp32_exit, setting_esp32_xkey_handler, 3, 0, NULL, setting_esp32_gui_update, {&menu_Setting_ESP32_Image_File, &menu_Setting_ESP32_Start_Address, &menu_Setting_ESP32_Firmware_Update}
+    "ESP32 update", setting_esp32_init, setting_esp32_exit, setting_esp32_xkey_handler, 4, 0, NULL, setting_esp32_gui_update, {&menu_Setting_ESP32_Image_File, &menu_Setting_ESP32_Start_Address, &menu_Setting_ESP32_Firmware_Update, &menu_Setting_ESP32_C6_Reset}
 };
 
 S_M1_Menu_t menu_Settings_About =
 {
     "About", settings_about, NULL, NULL, 0, 0, NULL, NULL, NULL
-};
-
-S_M1_Menu_t menu_Settings =
-{
-    "Settings", menu_settings_init, NULL, NULL, 7, 0, menu_m1_icon_setting, NULL,
-    {&menu_Settings_LCD_and_Notifications, &menu_Settings_Storage, &menu_Settings_Power, &menu_Settings_System, &menu_Setting_Firmware_Update, &menu_Setting_ESP32, &menu_Settings_About}
 };
 
 /*------------------------------ > 802.15.4 ----------------------------------*/
@@ -401,7 +403,17 @@ S_M1_Menu_t menu_802154_Thread =
 
 S_M1_Menu_t menu_Wifi_Scan_AP =
 {
-    "WiFi Scan+Connect", wifi_scan_ap, NULL, NULL, 0, 0, NULL, NULL, NULL
+    "Scan 2.4G WiFi", wifi_scan_ap, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
+S_M1_Menu_t menu_Wifi_Survey =
+{
+    "2.4G Survey", wifi_survey_24g, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
+S_M1_Menu_t menu_Wifi_Health =
+{
+    "2.4G Health", wifi_health_24g, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
 S_M1_Menu_t menu_Wifi_Config =
@@ -410,6 +422,11 @@ S_M1_Menu_t menu_Wifi_Config =
 };
 
 #ifdef M1_APP_WIFI_CONNECT_ENABLE
+S_M1_Menu_t menu_Wifi_Sync_RTC =
+{
+    "Sync RTC", wifi_sync_rtc_tool, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
 S_M1_Menu_t menu_Wifi_Status =
 {
     "Status", wifi_show_status, NULL, NULL, 0, 0, NULL, NULL, NULL
@@ -422,14 +439,17 @@ S_M1_Menu_t menu_Wifi_Disconnect =
 
 S_M1_Menu_t menu_Wifi =
 {
-    "Wifi", menu_wifi_init, NULL, NULL, 6, 0, menu_m1_icon_wifi, NULL,
-    {&menu_Wifi_Scan_AP, &menu_802154_Zigbee, &menu_802154_Thread, &menu_Wifi_Config, &menu_Wifi_Status, &menu_Wifi_Disconnect}
+    "WiFi 2.4G", menu_wifi_init, NULL, NULL, 9, 0, menu_m1_icon_wifi, NULL,
+    {&menu_Wifi_Scan_AP, &menu_Wifi_Survey, &menu_Wifi_Health, &menu_802154_Zigbee,
+     &menu_802154_Thread, &menu_Wifi_Config, &menu_Wifi_Sync_RTC,
+     &menu_Wifi_Status, &menu_Wifi_Disconnect}
 };
 #else
 S_M1_Menu_t menu_Wifi =
 {
-    "Wifi", menu_wifi_init, NULL, NULL, 4, 0, menu_m1_icon_wifi, NULL,
-    {&menu_Wifi_Scan_AP, &menu_802154_Zigbee, &menu_802154_Thread, &menu_Wifi_Config}
+    "WiFi 2.4G", menu_wifi_init, NULL, NULL, 6, 0, menu_m1_icon_wifi, NULL,
+    {&menu_Wifi_Scan_AP, &menu_Wifi_Survey, &menu_Wifi_Health,
+     &menu_802154_Zigbee, &menu_802154_Thread, &menu_Wifi_Config}
 };
 #endif
 
@@ -505,7 +525,7 @@ S_M1_Menu_t menu_Bluetooth =
 
 S_M1_Menu_t menu_BadUSB =
 {
-    "BadUSB", badusb_run, NULL, NULL, 0, 0, menu_m1_icon_badusb, NULL, NULL
+    "BadUSB", badusb_main_menu, NULL, NULL, 0, 0, menu_m1_icon_badusb, NULL, NULL
 };
 #endif /* M1_APP_BADUSB_ENABLE */
 
@@ -536,26 +556,6 @@ S_M1_Menu_t menu_Apps =
 };
 #endif /* M1_APP_APPS_ENABLE */
 
-/*------------------------------- > MAIN MENU --------------------------------*/
-
-const S_M1_Menu_t menu_Main =
-{
-#if defined(M1_APP_BADUSB_ENABLE) && defined(M1_APP_GAMES_ENABLE) && defined(M1_APP_APPS_ENABLE)
-    "Main Menu", NULL, NULL, NULL, 11, 0, NULL, NULL,
-    {&menu_Sub_GHz, &menu_125KHz_RFID, &menu_NFC, &menu_Infrared, &menu_GPIO, &menu_Wifi, &menu_Bluetooth, &menu_BadUSB, &menu_Games, &menu_Apps, &menu_Settings}
-#elif defined(M1_APP_BADUSB_ENABLE)
-    "Main Menu", NULL, NULL, NULL, 9, 0, NULL, NULL,
-    {&menu_Sub_GHz, &menu_125KHz_RFID, &menu_NFC, &menu_Infrared, &menu_GPIO, &menu_Wifi, &menu_Bluetooth, &menu_BadUSB, &menu_Settings}
-#elif defined(M1_APP_GAMES_ENABLE) && defined(M1_APP_APPS_ENABLE)
-    "Main Menu", NULL, NULL, NULL, 10, 0, NULL, NULL,
-    {&menu_Sub_GHz, &menu_125KHz_RFID, &menu_NFC, &menu_Infrared, &menu_GPIO, &menu_Wifi, &menu_Bluetooth, &menu_Games, &menu_Apps, &menu_Settings}
-#else
-    "Main Menu", NULL, NULL, NULL, 8, 0, NULL, NULL,
-    {&menu_Sub_GHz, &menu_125KHz_RFID, &menu_NFC, &menu_Infrared, &menu_GPIO, &menu_Wifi, &menu_Bluetooth, &menu_Settings}
-#endif
-};
-
-
 /***************************** V A R I A B L E S ******************************/
 
 static S_M1_Menu_Control_t		menu_ctl;
@@ -581,7 +581,7 @@ static void menu_main_init(void)
     menu_ctl.menu_level = 0; // main menu
     menu_ctl.menu_item_active = 0; // first menu item
     menu_ctl.last_selected_items[0] = 0; // last selected item is the current active item
-    menu_ctl.main_menu_ptr[0] = &menu_Main; // level 0 should be the main menu
+    menu_ctl.main_menu_ptr[0] = &menu_Main;
     menu_ctl.num_menu_items = menu_ctl.main_menu_ptr[0]->num_submenu_items;
 
     assert(menu_ctl.num_menu_items >= 3);
@@ -612,11 +612,16 @@ void menu_main_handler_task(void *param)
 
 	if (m1_esp32_auto_init)
 	{
-		m1_esp32_init();
-		esp32_main_init();
+		if (!m1_esp32_get_init_status())
+			m1_esp32_init();
+		if (!get_esp32_main_init_status())
+			esp32_main_init();
 	}
 
-	vTaskDelay(POWER_UP_SYS_CONFIG_WAIT_TIME); // Give some time to startup_config_handler() during power-up
+	menu_main_init();
+	m1_device_stat.op_mode = M1_OPERATION_MODE_MENU_ON;
+	m1_device_stat.active_timestamp = HAL_GetTick();
+	m1_gui_menu_update(pthis_submenu, 0, MENU_UPDATE_INIT);
 	while(1)
 	{
 		menu_update_stat = MENU_UPDATE_NONE;
@@ -625,11 +630,17 @@ void menu_main_handler_task(void *param)
 			continue;
 		if ( q_item.q_evt_type!=Q_EVENT_KEYPAD )
 			continue;
-		// Notification is only sent to this task when there's any button activity,
-		// so it doesn't need to wait when reading the event from the queue
 		ret = xQueueReceive(button_events_q_hdl, &this_button_status, 0);
 		if ( ret!=pdTRUE ) // This should never happen!
 			continue; // Wait for a new notification when the attempt to read the button event fails
+
+		m1_device_stat.active_timestamp = HAL_GetTick();
+
+		if (this_button_status.event[BUTTON_BACK_KP_ID] != BUTTON_EVENT_IDLE &&
+		    this_button_status.event[BUTTON_UP_KP_ID] != BUTTON_EVENT_IDLE)
+		{
+			m1_power_down();
+		}
 
 		for (key=0; key<NUM_BUTTONS_MAX; key++)
 	    {
@@ -687,149 +698,80 @@ void menu_main_handler_task(void *param)
 	    						menu_main_init();
 	    						sel_item = 0;
 	    						menu_update_stat = MENU_UPDATE_INIT;
-	    						m1_device_stat.op_mode = M1_OPERATION_MODE_MENU_ON; // update new state
+	    						m1_device_stat.op_mode = M1_OPERATION_MODE_MENU_ON;
 	    					} // else if ( m1_device_stat.op_mode==M1_OPERATION_MODE_DISPLAY_ON )
-#ifdef BUTTON_REPEATED_PRESS_ENABLE
-	    					else if ( m1_device_stat.op_mode==M1_OPERATION_MODE_POWER_UP )
-	    					{
-	    						m1_device_stat.op_mode = M1_OPERATION_MODE_DISPLAY_ON; // update new state
-	    						m1_gui_welcome_scr();
-	    						; // Change settings/config to exit out of shutdown/sleep state
-	    					} // if ( m1_device_stat.op_mode==M1_OPERATION_MODE_POWER_UP )
-#endif // #ifdef BUTTON_REPEATED_PRESS_ENABLE
 	    				} // if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_CLICK )
-#ifndef BUTTON_REPEATED_PRESS_ENABLE
-	    				else if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_LCLICK )
-	    				{
-	    					if ( m1_device_stat.op_mode==M1_OPERATION_MODE_POWER_UP )
-	    					{
-	    						m1_device_stat.op_mode = M1_OPERATION_MODE_DISPLAY_ON; // update new state
-	    						m1_gui_welcome_scr();
-	    						; // Change settings/config to exit out of shutdown/sleep state
-	    					} // if ( m1_device_stat.op_mode==M1_OPERATION_MODE_POWER_UP )
-	    					else if ( m1_device_stat.op_mode==M1_OPERATION_MODE_MENU_ON )
-	    					{
-	    						//m1_device_stat.op_mode = OPERATION_MODE_SHUTDOWN; // force to sleep mode immediately
-	    						//System_Shutdown();
-	    					} // else if ( m1_device_stat.op_mode==M1_OPERATION_MODE_MENU_ON )
-	    				} // if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_LCLICK )
-#endif // #ifndef BUTTON_REPEATED_PRESS_ENABLE
 	                    break;
 
 	    			case BUTTON_UP_KP_ID:
-						if ( m1_device_stat.op_mode==M1_OPERATION_MODE_MENU_ON )
-						{
-							if ( this_button_status.event[BUTTON_DOWN_KP_ID]==BUTTON_EVENT_CLICK ) // UP and DOWN pressed at the same time?
-								break; // Do nothing
-							sel_item = menu_ctl.menu_item_active; // take the current active menu item
-							if ( sel_item==0 ) // first menu item?
-							{
-								sel_item = menu_ctl.num_menu_items - 1; // move to last menu item
-								//menu_ctl.total_menu_items = menu_ctl.main_menu_ptr[menu_ctl.menu_level]->submenu_items;
-							}
-							else // not the first item
-							{
-								sel_item--;
-							}
-							menu_ctl.menu_item_active = sel_item; // update the active index
-							menu_update_stat = MENU_UPDATE_MOVE_UP;
-						} // if ( m1_device_stat.op_mode==M1_OPERATION_MODE_MENU_ON )
+						if ( m1_device_stat.op_mode!=M1_OPERATION_MODE_MENU_ON )
+							break;
+						if ( this_button_status.event[BUTTON_DOWN_KP_ID]==BUTTON_EVENT_CLICK ) // UP and DOWN pressed at the same time?
+							break; // Do nothing
+						sel_item = menu_ctl.menu_item_active;
+						if ( sel_item==0 )
+							sel_item = menu_ctl.num_menu_items - 1;
 						else
-						{
-							; // Do something here if necessary. This case may never happen!
-						}
+							sel_item--;
+						menu_ctl.menu_item_active = sel_item;
+						menu_update_stat = MENU_UPDATE_MOVE_UP;
 	    				break;
 
 	    			case BUTTON_DOWN_KP_ID:
-						if ( m1_device_stat.op_mode==M1_OPERATION_MODE_MENU_ON )
-						{
-							if ( this_button_status.event[BUTTON_UP_KP_ID]==BUTTON_EVENT_CLICK ) // UP and DOWN pressed at the same time?
-								break; // Do nothing
-	                        sel_item = menu_ctl.menu_item_active; // take the current active menu item
-	                        if ( sel_item==(menu_ctl.num_menu_items - 1) ) // last menu item?
-	                        {
-	                        	sel_item = 0; // move to first menu item
-	                        }
-	                        else // not the last item
-	                        {
-	                        	sel_item++;
-	                        }
-	                        menu_ctl.menu_item_active = sel_item; // update the active index
-	                        menu_update_stat = MENU_UPDATE_MOVE_DOWN;
-						}
+						if ( m1_device_stat.op_mode!=M1_OPERATION_MODE_MENU_ON )
+							break;
+						if ( this_button_status.event[BUTTON_UP_KP_ID]==BUTTON_EVENT_CLICK ) // UP and DOWN pressed at the same time?
+							break; // Do nothing
+						sel_item = menu_ctl.menu_item_active;
+						if ( sel_item==(menu_ctl.num_menu_items - 1) )
+							sel_item = 0;
 						else
-						{
-							; // Do something here if necessary. This case may never happen!
-							if ( this_button_status.event[BUTTON_DOWN_KP_ID]==BUTTON_EVENT_LCLICK )
-							{
-								m1_buzzer_notification();
-							}
-						}
+							sel_item++;
+						menu_ctl.menu_item_active = sel_item;
+						menu_update_stat = MENU_UPDATE_MOVE_DOWN;
 	    				break;
 
 	    			case BUTTON_LEFT_KP_ID:
-						if ( m1_device_stat.op_mode==M1_OPERATION_MODE_MENU_ON )
-						{
-							if ( pthis_submenu->xkey_handler )
-								pthis_submenu->xkey_handler(this_button_status.event[BUTTON_LEFT_KP_ID], BUTTON_LEFT_KP_ID, sel_item);
-						}
-						else if ( m1_device_stat.op_mode==M1_OPERATION_MODE_DISPLAY_ON )
-						{
-							storage_explore();
-							m1_gui_welcome_scr();
-						}
+						if ( m1_device_stat.op_mode!=M1_OPERATION_MODE_MENU_ON )
+							break;
+						if ( pthis_submenu->xkey_handler )
+							pthis_submenu->xkey_handler(this_button_status.event[BUTTON_LEFT_KP_ID], BUTTON_LEFT_KP_ID, sel_item);
 	    				break;
 
 	    			case BUTTON_RIGHT_KP_ID:
-						if ( m1_device_stat.op_mode==M1_OPERATION_MODE_MENU_ON )
-						{
-							if ( pthis_submenu->xkey_handler )
-								pthis_submenu->xkey_handler(this_button_status.event[BUTTON_RIGHT_KP_ID], BUTTON_RIGHT_KP_ID, sel_item);
-						}
-						else
-						{
-							; // Do something here if necessary. This case may never happen!
-						}
+						if ( m1_device_stat.op_mode!=M1_OPERATION_MODE_MENU_ON )
+							break;
+						if ( pthis_submenu->xkey_handler )
+							pthis_submenu->xkey_handler(this_button_status.event[BUTTON_RIGHT_KP_ID], BUTTON_RIGHT_KP_ID, sel_item);
 	    				break;
 
 	    			case BUTTON_BACK_KP_ID:
-						if ( m1_device_stat.op_mode==M1_OPERATION_MODE_MENU_ON )
+						if ( m1_device_stat.op_mode!=M1_OPERATION_MODE_MENU_ON )
+							break;
+						if ( menu_update_stat!=MENU_UPDATE_NONE ) // Other buttons pressed?
+							break; // Do nothing, let other buttons take their higher priority!
+						if ( menu_ctl.menu_level==0 ) // already at main menu screen?
 						{
-							if ( menu_update_stat!=MENU_UPDATE_NONE ) // Other buttons pressed?
-								break; // Do nothing, let other buttons take their higher priority!
-							if ( menu_ctl.menu_level==0 ) // already at main menu screen?
-							{
-	    						m1_device_stat.op_mode = M1_OPERATION_MODE_DISPLAY_ON; // update new state
-	    						m1_gui_welcome_scr();
-								; // Do something before going to default home screen
-								//
-							} // if ( menu_ctl.menu_level==0 )
-							else
-							{
-								if ( menu_ctl.num_menu_items ) // Submenu with active items?
-								{
-									if ( pthis_submenu->deinit_func )
-										pthis_submenu->deinit_func(); // Run deinit function of this submenu before leaving
-								} // if ( menu_ctl.num_menu_items )
-								menu_ctl.menu_level--; // go back one level
-								menu_ctl.menu_item_active = menu_ctl.last_selected_items[menu_ctl.menu_level]; // restore  previous selected item of the upper menu level
-								pthis_submenu = menu_ctl.main_menu_ptr[menu_ctl.menu_level]; // save the current menu level index
-								menu_ctl.this_func = pthis_submenu->sub_func;
-								menu_ctl.num_menu_items = pthis_submenu->num_submenu_items;
-								n_items = menu_ctl.num_menu_items;
-								sel_item = menu_ctl.menu_item_active;
-								if ( menu_ctl.this_func != NULL )
-								{
-									menu_ctl.this_func(); // run the function of the selected submenu item to initialize it
-									// It's not necessary to set the flag sub_func_is_running here.
-									// This function should complete quickly after initializing the display!!!
-								} // if ( menu_ctl.this_func != NULL )
-								menu_update_stat = MENU_UPDATE_RESTORE;
-							} // else
-						} // if ( m1_device_stat.op_mode==M1_OPERATION_MODE_MENU_ON )
+							startup_info_screen_display(M1_PRODUCT_HOME_SUBTITLE);
+							// op_mode is now DISPLAY_ON; pressing OK will re-init menu
+						}
 						else
 						{
-							; // Do something here if necessary. This case may never happen!
+							if ( menu_ctl.num_menu_items ) // Submenu with active items?
+							{
+								if ( pthis_submenu->deinit_func )
+									pthis_submenu->deinit_func();
+							}
+							menu_ctl.menu_level--;
+							menu_ctl.menu_item_active = menu_ctl.last_selected_items[menu_ctl.menu_level];
+							pthis_submenu = menu_ctl.main_menu_ptr[menu_ctl.menu_level];
+							menu_ctl.this_func = pthis_submenu->sub_func;
+							menu_ctl.num_menu_items = pthis_submenu->num_submenu_items;
+							n_items = menu_ctl.num_menu_items;
+							sel_item = menu_ctl.menu_item_active;
+							if ( menu_ctl.this_func != NULL )
+								menu_ctl.this_func();
+							menu_update_stat = MENU_UPDATE_RESTORE;
 						}
 	    				break;
 

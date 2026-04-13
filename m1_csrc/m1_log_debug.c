@@ -590,9 +590,16 @@ void m1_logdb_write(const char* data)
 {
 	printf("%s", data);
 	fflush(stdout);
-	//huart->gState = HAL_UART_STATE_BUSY_TX;
-	/* At end of Tx process, restore huart->gState to Ready */
-	//huart->gState = HAL_UART_STATE_READY;
+
+#ifdef M1_APP_RPC_ENABLE
+	/* Mirror log output to qMonstatek via RPC debug log frames */
+	if (m1_rpc_active && data) {
+	    uint16_t len = (uint16_t)strlen(data);
+	    if (len > 0) {
+	        m1_rpc_send_debug_log(data, len);
+	    }
+	}
+#endif
 } // void m1_logdb_write(const char* data)
 
 

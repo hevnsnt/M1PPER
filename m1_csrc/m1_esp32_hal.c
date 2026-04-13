@@ -444,7 +444,7 @@ void m1_esp32_deinit(void)
 #ifndef ESP32_UART_DISABLE
 		esp32_UART_deinit();
 #endif // #ifndef ESP32_UART_DISABLE
-//		esp32_disable();
+		esp32_disable();
 
 		esp32_init_done = FALSE;
 		esp32_uart_init_done = FALSE;
@@ -466,6 +466,11 @@ uint8_t m1_esp32_get_init_status(void)
 {
 	return esp32_init_done;
 } // uint8_t m1_esp32_get_init_status(void)
+
+void m1_esp32_force_reinit(void)
+{
+	esp32_init_done = FALSE;
+} // void m1_esp32_force_reinit(void)
 
 
 

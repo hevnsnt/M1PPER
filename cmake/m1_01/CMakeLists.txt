@@ -460,6 +460,7 @@ target_sources(m1_01 INTERFACE
     ../../m1_csrc/m1_sys_init.c
     ../../m1_csrc/m1_system.c
     ../../m1_csrc/m1_tasks.c
+    ../../m1_csrc/m1_main_menu.c
     ../../m1_csrc/m1_usb_cdc_msc.c
     ../../m1_csrc/m1_virtual_kb.c
     ../../m1_csrc/m1_watchdog.c
@@ -481,6 +482,7 @@ target_sources(m1_01 INTERFACE
     # === Enhanced firmware: BadUSB (Phase 7) ===
     ../../USB/Class/HID/Src/usbd_hid.c
     ../../m1_csrc/m1_badusb.c
+    ../../m1_csrc/m1_badusb_fingerprint.c
     # === Enhanced firmware: Bad-BT (Phase 8) ===
     ../../m1_csrc/m1_badbt.c
     # === Enhanced firmware: Built-in Games (Phase 9) ===
@@ -507,5 +509,4 @@ target_link_libraries(m1_01 INTERFACE
 if(CMAKE_C_STANDARD LESS 11)
     message(ERROR "Generated code requires C11 or higher")
 endif()
-
 

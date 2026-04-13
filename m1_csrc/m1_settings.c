@@ -19,6 +19,7 @@
 #include "stm32h5xx_hal.h"
 #include "main.h"
 #include "m1_settings.h"
+#include "m1_branding.h"
 #include "m1_buzzer.h"
 #include "m1_lcd.h"
 #include "m1_lp5814.h"
@@ -26,6 +27,7 @@
 #include "ff.h"
 #include "m1_log_debug.h"
 #include "m1_fw_update_bl.h"
+#include "m1_t1000_version.h"
 #include "m1_system.h"
 #include "m1_file_util.h"
 
@@ -62,8 +64,6 @@ static const char *s_sleep_text[] = { "30s", "1 min", "5 min", "10 min", "15 min
 
 /********************* F U N C T I O N   P R O T O T Y P E S ******************/
 
-void menu_settings_init(void);
-void menu_settings_exit(void);
 void settings_system(void);
 void settings_about(void);
 static void settings_about_display_choice(uint8_t choice);
@@ -80,27 +80,12 @@ void settings_save_to_sd(void);
   * @retval
   */
 /*============================================================================*/
-void menu_settings_init(void)
-{
-	;
-} // void menu_settings_init(void)
-
-
-
 /*============================================================================*/
 /**
   * @brief
   * @param
   * @retval
   */
-/*============================================================================*/
-void menu_settings_exit(void)
-{
-	;
-} // void menu_settings_exit(void)
-
-
-
 /*============================================================================*/
 /**
   * @brief  Apply screen orientation and sync m1_southpaw_mode
@@ -471,12 +456,12 @@ static void settings_about_display_choice(uint8_t choice)
 	{
 		case 0: // FW info
 			u8g2_SetFont(&m1_u8g2, M1_DISP_SUB_MENU_FONT_B); // Set bold font
-			u8g2_DrawStr(&m1_u8g2, 0, ABOUT_BOX_Y_POS_ROW_1, "M1 by C3");
+			u8g2_DrawStr(&m1_u8g2, 0, ABOUT_BOX_Y_POS_ROW_1, M1_PRODUCT_NAME);
 			u8g2_SetFont(&m1_u8g2, M1_DISP_SUB_MENU_FONT_N); // Set normal font
-			sprintf(prn_name, "%d.%d.%d.%d-C3.%d", m1_device_stat.config.fw_version_major, m1_device_stat.config.fw_version_minor, m1_device_stat.config.fw_version_build, m1_device_stat.config.fw_version_rc, M1_C3_REVISION);
-			u8g2_DrawStr(&m1_u8g2, 0, ABOUT_BOX_Y_POS_ROW_2, prn_name);
+			u8g2_DrawStr(&m1_u8g2, 0, ABOUT_BOX_Y_POS_ROW_2, T1000_VERSION_STRING);
 			sprintf(prn_name, "Active bank: %d", (m1_device_stat.active_bank==BANK1_ACTIVE)?1:2);
 			u8g2_DrawStr(&m1_u8g2, 0, ABOUT_BOX_Y_POS_ROW_3, prn_name);
+			u8g2_DrawStr(&m1_u8g2, 0, ABOUT_BOX_Y_POS_ROW_4, T1000_COMPAT_VERSION_STRING);
 			break;
 
 		case 1: // Company info
