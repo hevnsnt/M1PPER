@@ -16,11 +16,14 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "stm32h5xx_hal.h"
 #include "main.h"
 #include "m1_display.h"
 #include "m1_sdcard.h"
 #include "m1_storage.h"
+#include "m1_virtual_kb.h"
+#include "m1_file_util.h"
 
 /*************************** D E F I N E S ************************************/
 
@@ -32,7 +35,7 @@
 
 #define BROWSE_GUI_DISP_LINE_LEN_MAX			(M1_LCD_DISPLAY_WIDTH/M1_SUB_MENU_SFONT_WIDTH - 3)
 
-#define SDCARD_EXPLORE_FUNCTIONS_N				1
+#define SDCARD_EXPLORE_FUNCTIONS_N				2
 
 //************************** S T R U C T U R E S *******************************
 
@@ -48,7 +51,6 @@ static const char *sdcard_fat_sys_defs[] = {
 static const char *sdcard_explore_options[] = {
 		"Delete",
 		"Rename",
-		"Run",
 };
 
 /***************************** V A R I A B L E S ******************************/
@@ -216,7 +218,13 @@ void storage_explore(void)
 	S_M1_file_info *f_info;
 	BaseType_t ret;
 	uint8_t uret, no_file, sel_active, sel_item, refresh;
-	char *fullpath = NULL;
+	char fullpath[ESP_FILE_PATH_LEN_MAX + ESP_FILE_NAME_LEN_MAX + 2];
+	char dir_path[ESP_FILE_PATH_LEN_MAX + 1];
+	char base_name[ESP_FILE_NAME_LEN_MAX + 1];
+	char new_name[ESP_FILE_NAME_LEN_MAX + 1];
+	char new_path[ESP_FILE_PATH_LEN_MAX + ESP_FILE_NAME_LEN_MAX + 8];
+	const char *ext;
+	FRESULT fres;
 
 	sel_active = 0;
 	refresh = 0;
@@ -284,9 +292,7 @@ void storage_explore(void)
 					{
 						if ( sel_active )
 						{
-							fullpath = malloc(ESP_FILE_PATH_LEN_MAX + ESP_FILE_NAME_LEN_MAX + 1);
-							assert(fullpath!=NULL);
-							sprintf(fullpath, "%s/%s", f_info->dir_name, f_info->file_name);
+							snprintf(fullpath, sizeof(fullpath), "%s/%s", f_info->dir_name, f_info->file_name);
 							uret = m1_fb_delete_file(fullpath);
 							if ( !uret )
 							{
@@ -300,8 +306,6 @@ void storage_explore(void)
 								browse_info_box_update(INFO_BOX_Y_POS_ROW_3, "DELETE failed!");
 							} // else
 							sel_active = 0;
-							free(fullpath);
-							fullpath = NULL;
 						} // if ( sel_active )
 					} // if (sel_item==0)
 				} // else if ( this_button_status.event[BUTTON_RIGHT_KP_ID]==BUTTON_EVENT_CLICK )
@@ -324,6 +328,53 @@ void storage_explore(void)
 						    sel_active = 0;
 						} // else
 					} // if (sel_item==0)
+					else if (sel_item==1) // Rename?
+					{
+						snprintf(fullpath, sizeof(fullpath), "%s/%s", f_info->dir_name, f_info->file_name);
+						fu_get_directory_path(fullpath, dir_path, sizeof(dir_path));
+						fu_get_filename_without_ext(fullpath, base_name, sizeof(base_name));
+						uret = m1_vkb_get_filename("Rename:", base_name, new_name);
+						if ( !uret )
+						{
+							browse_gui_update(sel_item, f_info->file_name);
+							continue;
+						}
+
+						ext = fu_get_file_extension(f_info->file_name);
+						snprintf(new_path, sizeof(new_path), "%s/%s%s",
+								 dir_path,
+								 new_name,
+								 (ext != NULL) ? ext : "");
+
+						if ( strcmp(fullpath, new_path)==0 )
+						{
+							browse_info_box_update(INFO_BOX_Y_POS_ROW_3, "Name unchanged");
+							vTaskDelay(400);
+							browse_gui_update(sel_item, f_info->file_name);
+							continue;
+						}
+						if ( m1_fb_check_existence(new_path) )
+						{
+							browse_info_box_update(INFO_BOX_Y_POS_ROW_3, "File already exists");
+							vTaskDelay(500);
+							browse_gui_update(sel_item, f_info->file_name);
+							continue;
+						}
+
+						fres = f_rename(fullpath, new_path);
+						if ( fres==FR_OK )
+						{
+							browse_info_box_update(INFO_BOX_Y_POS_ROW_3, "RENAME successful!");
+							vTaskDelay(500);
+							refresh = 1;
+						}
+						else
+						{
+							browse_info_box_update(INFO_BOX_Y_POS_ROW_3, "RENAME failed!");
+							vTaskDelay(500);
+							browse_gui_update(sel_item, f_info->file_name);
+						}
+					} // else if (sel_item==1)
 				} // else if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_CLICK )
 
 				if ( refresh )

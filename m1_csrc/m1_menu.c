@@ -576,6 +576,16 @@ S_M1_Menu_t menu_DvdLogo =
     "DVD Logo", app_dvd_logo_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
 };
 
+S_M1_Menu_t menu_SystemDashboard =
+{
+    "System Dashboard", app_system_dashboard_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+
+S_M1_Menu_t menu_FileTools =
+{
+    "File Tools", app_file_tools_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+
 S_M1_Menu_t menu_Apps_Browser =
 {
     "Apps Browser", game_apps_browser_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
@@ -583,8 +593,8 @@ S_M1_Menu_t menu_Apps_Browser =
 
 S_M1_Menu_t menu_Apps =
 {
-    "Apps", NULL, NULL, NULL, 3, 0, menu_m1_icon_apps, NULL,
-    {&menu_DabTimer, &menu_DvdLogo, &menu_Apps_Browser}
+    "Apps", NULL, NULL, NULL, 5, 0, menu_m1_icon_apps, NULL,
+    {&menu_DabTimer, &menu_DvdLogo, &menu_SystemDashboard, &menu_FileTools, &menu_Apps_Browser}
 };
 #endif /* M1_APP_APPS_ENABLE */
 
@@ -667,6 +677,23 @@ void menu_main_handler_task(void *param)
 			continue; // Wait for a new notification when the attempt to read the button event fails
 
 		m1_device_stat.active_timestamp = HAL_GetTick();
+
+		if (m1_shutdown_prompt_take())
+		{
+			xQueueReset(main_q_hdl);
+			xQueueReset(button_events_q_hdl);
+			power_off_hold_prompt();
+
+			if (m1_device_stat.op_mode == M1_OPERATION_MODE_DISPLAY_ON)
+			{
+				startup_info_screen_display(M1_PRODUCT_HOME_SUBTITLE);
+			}
+			else
+			{
+				m1_gui_menu_update(pthis_submenu, menu_ctl.menu_item_active, MENU_UPDATE_REFRESH);
+			}
+			continue;
+		}
 
 		if (this_button_status.event[BUTTON_BACK_KP_ID] != BUTTON_EVENT_IDLE &&
 		    this_button_status.event[BUTTON_UP_KP_ID] != BUTTON_EVENT_IDLE)

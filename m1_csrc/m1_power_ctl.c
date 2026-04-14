@@ -54,6 +54,7 @@ enum {
 
 float f_monitor;
 static TimerHandle_t batt_info_timer_hdl;
+static bool s_shutdown_prompt_wait_release = false;
 
 /********************* F U N C T I O N   P R O T O T Y P E S ******************/
 
@@ -63,6 +64,7 @@ void menu_setting_power_exit(void);
 void power_battery_info(void);
 void power_reboot(void);
 void power_off(void);
+void power_off_hold_prompt(void);
 //void power_init(void);
 void m1_pre_power_down(void);
 static void m1_system_drivers_disable(void);
@@ -87,6 +89,7 @@ static void power_shutdown_gui_create(uint8_t param);
 static void power_shutdown_gui_destroy(uint8_t param);
 static void power_shutdown_gui_update(uint8_t param);
 static int power_shutdown_gui_message(void);
+static void power_off_run(void);
 
 static void battery_info_timer(TimerHandle_t xTimer);
 
@@ -177,6 +180,26 @@ void power_reboot(void)
  */
 /*============================================================================*/
 void power_off(void)
+{
+	s_shutdown_prompt_wait_release = false;
+	power_off_run();
+}
+
+void power_off_hold_prompt(void)
+{
+	s_shutdown_prompt_wait_release = true;
+	power_off_run();
+}
+
+
+/*============================================================================*/
+/*
+  * @brief
+  * @param
+  * @retval
+ */
+/*============================================================================*/
+static void power_off_run(void)
 {
 	// initial
 	m1_uiView_functions_init(VIEW_MODE_BATTERY_END, view_power_battery_table);
@@ -545,9 +568,29 @@ void power_reboot_gui_init(void)
 static int power_shutdown_kp_handler(void)
 {
 	S_M1_Buttons_Status this_button_status;
+	uint8_t back_pressed;
 
 	if(xQueueReceive(button_events_q_hdl, &this_button_status, 0) != pdTRUE)
 		return 1;
+
+	back_pressed = (HAL_GPIO_ReadPin(m1_buttons_io[BUTTON_BACK_KP_ID].gpio_port,
+	                                 m1_buttons_io[BUTTON_BACK_KP_ID].gpio_pin)
+	                == buttons_ctl[BUTTON_BACK_KP_ID].active_level);
+
+	if (s_shutdown_prompt_wait_release)
+	{
+		if (back_pressed)
+		{
+			if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_CLICK
+			  || this_button_status.event[BUTTON_RIGHT_KP_ID]==BUTTON_EVENT_CLICK )
+			{
+				m1_power_down();
+			}
+			return 1;
+		}
+
+		s_shutdown_prompt_wait_release = false;
+	}
 
 	if ( (this_button_status.event[BUTTON_BACK_KP_ID]==BUTTON_EVENT_CLICK) ||
 		 (this_button_status.event[BUTTON_LEFT_KP_ID]==BUTTON_EVENT_CLICK) ) // user wants to exit?
@@ -558,7 +601,8 @@ static int power_shutdown_kp_handler(void)
 		return 0;
 		//break; // Exit and return to the calling task (subfunc_handler_task)
 	} // if ( m1_buttons_status[BUTTON_BACK_KP_ID]==BUTTON_EVENT_CLICK )
-	else if ( this_button_status.event[BUTTON_RIGHT_KP_ID]==BUTTON_EVENT_CLICK ) // Power off?
+	else if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_CLICK ||
+			  this_button_status.event[BUTTON_RIGHT_KP_ID]==BUTTON_EVENT_CLICK ) // Power off?
 	{
 		m1_power_down();
 	} // else if ( this_button_status.event[BUTTON_RIGHT_KP_ID]==BUTTON_EVENT_CLICK )
@@ -610,7 +654,7 @@ static void power_shutdown_gui_update(uint8_t param)
 	m1_draw_text(&m1_u8g2, 2, 49, 124, res_string(IDS_POWER_OFF), TEXT_ALIGN_CENTER);
 
 	u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
-	m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, res_string(IDS_CANCEL), res_string(IDS_POWER_OFF1), arrowright_8x8);
+	m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, res_string(IDS_CANCEL), "OK Off", arrowright_8x8);
 
 	m1_u8g2_nextpage(); // Update display RAM
 }

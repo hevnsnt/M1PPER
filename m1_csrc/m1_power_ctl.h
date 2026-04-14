@@ -19,6 +19,7 @@ void menu_setting_power_exit(void);
 void power_battery_info(void);
 void power_reboot(void);
 void power_off(void);
+void power_off_hold_prompt(void);
 //void power_init(void);
 void m1_pre_power_down(void);
 void m1_power_down(void);

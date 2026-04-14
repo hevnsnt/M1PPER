@@ -69,6 +69,7 @@ char                    m1_badbt_name[BADBT_NAME_MAX_LEN + 1] = "M1-BadBT";
 QueueHandle_t 			button_events_q_hdl = NULL;
 TaskHandle_t			system_task_hdl;
 TaskHandle_t 			idle_task_hdl;
+static volatile uint8_t s_shutdown_prompt_pending = 0;
 
 /********************* F U N C T I O N   P R O T O T Y P E S ******************/
 
@@ -84,6 +85,8 @@ void startup_config_handler(void);
 void HAL_Delay(uint32_t Delay);
 static void startup_bu_registers_init(void);
 void startup_info_screen_display(const char *scr_text);
+bool m1_shutdown_prompt_take(void);
+void m1_shutdown_prompt_clear(void);
 
 /*************** F U N C T I O N   I M P L E M E N T A T I O N ****************/
 
@@ -98,6 +101,12 @@ void system_periodic_task(void *param)
     uint32_t temp, current_tick;
     uint8_t this_button_level, i;
     uint8_t event_change;
+    static uint8_t back_hold_active = 0;
+    static uint8_t back_prompt_sent = 0;
+    static uint8_t back_force_sent = 0;
+    static uint32_t back_hold_start_tick = 0;
+    uint8_t back_pressed;
+    uint8_t allow_shutdown_hold;
 
 	// Create Queue.
     button_events_q_hdl = xQueueCreate(1, sizeof(S_M1_Buttons_Status));
@@ -273,6 +282,48 @@ void system_periodic_task(void *param)
         	} // switch ( buttons_ctl[i].status )
         } // for (i=0; i<NUM_BUTTONS_MAX; i++)
 
+        allow_shutdown_hold = (m1_device_stat.op_mode == M1_OPERATION_MODE_MENU_ON)
+                           || (m1_device_stat.op_mode == M1_OPERATION_MODE_DISPLAY_ON)
+                           || (m1_device_stat.op_mode == M1_OPERATION_MODE_SUB_FUNC_RUNNING);
+        back_pressed = (HAL_GPIO_ReadPin(m1_buttons_io[BUTTON_BACK_KP_ID].gpio_port,
+                                         m1_buttons_io[BUTTON_BACK_KP_ID].gpio_pin)
+                        == buttons_ctl[BUTTON_BACK_KP_ID].active_level);
+
+        if (allow_shutdown_hold && back_pressed)
+        {
+            if (!back_hold_active)
+            {
+                back_hold_active = 1;
+                back_prompt_sent = 0;
+                back_force_sent = 0;
+                back_hold_start_tick = current_tick;
+            }
+            else
+            {
+                temp = current_tick - back_hold_start_tick;
+                if ((temp >= M1_BACK_HOLD_SHUTDOWN_PROMPT_MS) && !back_prompt_sent)
+                {
+                    s_shutdown_prompt_pending = 1;
+                    back_prompt_sent = 1;
+                }
+
+                if ((temp >= M1_BACK_HOLD_SHUTDOWN_FORCE_MS) && !back_force_sent)
+                {
+                    back_force_sent = 1;
+                    s_shutdown_prompt_pending = 0;
+                    xQueueReset(button_events_q_hdl);
+                    xQueueReset(main_q_hdl);
+                    m1_power_down();
+                }
+            }
+        }
+        else
+        {
+            back_hold_active = 0;
+            back_prompt_sent = 0;
+            back_force_sent = 0;
+        }
+
         if ( event_change )
         {
         	for (i=0; i<NUM_BUTTONS_MAX; i++)
@@ -326,6 +377,37 @@ void system_periodic_task(void *param)
     } // while (TRUE)
 
 } // void system_periodic_task(void *param)
+
+
+/*============================================================================*/
+/*
+ * This function returns and clears a pending shutdown prompt request.
+ */
+/*============================================================================*/
+bool m1_shutdown_prompt_take(void)
+{
+    bool pending;
+
+    taskENTER_CRITICAL();
+    pending = (s_shutdown_prompt_pending != 0U);
+    s_shutdown_prompt_pending = 0;
+    taskEXIT_CRITICAL();
+
+    return pending;
+}
+
+
+/*============================================================================*/
+/*
+ * This function clears a pending shutdown prompt request.
+ */
+/*============================================================================*/
+void m1_shutdown_prompt_clear(void)
+{
+    taskENTER_CRITICAL();
+    s_shutdown_prompt_pending = 0;
+    taskEXIT_CRITICAL();
+}
 
 
 

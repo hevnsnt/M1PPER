@@ -36,6 +36,10 @@
 #define LONG_PRESS_3000     3000
 #define LONG_PRESS_4000     4000
 #define LONG_PRESS_5000     5000
+#define LONG_PRESS_10000    10000
+
+#define M1_BACK_HOLD_SHUTDOWN_PROMPT_MS  LONG_PRESS_5000
+#define M1_BACK_HOLD_SHUTDOWN_FORCE_MS   LONG_PRESS_10000
 
 #define BUTTON_DEBOUNCE_MS  		50 // ms
 //#define BUTTON_DBC_MIDDLE   		500 // maximum interval between two clicks for double click recognition
@@ -162,6 +166,7 @@ typedef struct
 } S_M1_Device_Status_t;
 
 extern S_Buttons_Control 	buttons_ctl[];
+extern S_GPIO_IO_t       	m1_buttons_io[];
 extern S_M1_Buttons_Status 	m1_buttons_status;
 extern S_M1_Device_Status_t	m1_device_stat;
 extern uint8_t              m1_southpaw_mode;  /* 0=right-handed, 1=left-handed (legacy, derived from orientation) */
@@ -187,6 +192,8 @@ void startup_device_init(void);
 void startup_config_handler(void);
 void startup_config_write(uint8_t config_byte, uint8_t config_val);
 void startup_info_screen_display(const char *scr_text);
+bool m1_shutdown_prompt_take(void);
+void m1_shutdown_prompt_clear(void);
 
 typedef struct {
     uint16_t year;    /* 2024..2099 */
