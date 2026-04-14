@@ -83,6 +83,11 @@ void wifi_show_status(void);
 void wifi_disconnect(void);
 static uint16_t wifi_ap_list_get_index(void);
 static bool wifi_do_connect(const char *ssid, const char *password);
+static bool wifi_scan_ap_prompt_password(const wifi_scanlist_t *ap, char *password, uint16_t password_len);
+static bool wifi_scan_ap_connect_selected(const wifi_scanlist_t *ap);
+static void wifi_scan_ap_save_selected(const wifi_scanlist_t *ap);
+static void wifi_scan_ap_show_details(const wifi_scanlist_t *ap);
+static uint8_t wifi_scan_ap_options(const wifi_scanlist_t *ap);
 #endif
 
 /*************** F U N C T I O N   I M P L E M E N T A T I O N ****************/
@@ -462,9 +467,6 @@ void wifi_scan_ap(void)
 	uint16_t list_count;
 #ifdef M1_APP_WIFI_CONNECT_ENABLE
 	wifi_scanlist_t *list;
-	wifi_credential_t cred;
-	char password[WIFI_CRED_PASS_MAX_LEN];
-	bool do_connect;
 #endif
 
     /* Graphic work starts here */
@@ -518,7 +520,8 @@ void wifi_scan_ap(void)
 					if ( list_count )
 						wifi_ap_list_print(&app_req, false);
 				}
-				else if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_CLICK )
+				else if ( this_button_status.event[BUTTON_OK_KP_ID]==BUTTON_EVENT_CLICK ||
+						  this_button_status.event[BUTTON_RIGHT_KP_ID]==BUTTON_EVENT_CLICK )
 				{
 					if ( !list_count )
 					{
@@ -543,67 +546,10 @@ void wifi_scan_ap(void)
 
 					if ( s_current_ap_index >= app_req.u.wifi_ap_scan.count )
 						continue;
-
-					do_connect = false;
-					password[0] = '\0';
-
-					/* Check if we have saved credentials */
-					if ( wifi_cred_find((const char *)list[s_current_ap_index].ssid, &cred) )
-					{
-						/* Use saved password */
-						strncpy(password, cred.password, WIFI_CRED_PASS_MAX_LEN - 1);
-						password[WIFI_CRED_PASS_MAX_LEN - 1] = '\0';
-						do_connect = true;
-					}
-					else if ( list[s_current_ap_index].encryption_mode == 0 )
-					{
-						/* Open network - no password needed */
-						do_connect = true;
-					}
-					else
-					{
-						/* Prompt for password using virtual keyboard */
-						memset(password, 0, sizeof(password));
-						uint8_t pw_len = m1_vkb_get_filename("Password:",
-							"", password);
-						if ( pw_len > 0 )
-						{
-							do_connect = true;
-						}
-						else
-						{
-							/* User cancelled - redraw AP list */
-							u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
-							wifi_ap_list_print(NULL, false); /* reset state */
-							list_count = wifi_ap_list_print(&app_req, true);
-						}
-					}
-
-					if ( do_connect )
-					{
-						bool ok = wifi_do_connect(
-							(const char *)list[s_current_ap_index].ssid,
-							password);
-
-						if ( ok )
-						{
-							/* Offer to save credentials if not already saved */
-							if ( !wifi_cred_find((const char *)list[s_current_ap_index].ssid, &cred)
-								&& password[0] != '\0' )
-							{
-								wifi_cred_save(
-									(const char *)list[s_current_ap_index].ssid,
-									password);
-								wifi_display_msg("Credentials", "saved!");
-								vTaskDelay(pdMS_TO_TICKS(1500));
-							}
-						}
-
-						/* Redraw the scan list */
-						u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
-						wifi_ap_list_print(NULL, false); /* reset state */
-						list_count = wifi_ap_list_print(&app_req, true);
-					}
+					wifi_scan_ap_options(&list[s_current_ap_index]);
+					u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+					wifi_ap_list_print(NULL, false); /* reset state */
+					list_count = wifi_ap_list_print(&app_req, true);
 #endif /* M1_APP_WIFI_CONNECT_ENABLE */
 				}
 			} // if ( q_item.q_evt_type==Q_EVENT_KEYPAD )
@@ -862,7 +808,7 @@ static uint16_t wifi_ap_list_print(ctrl_cmd_t *app_resp, bool up_dir)
 	m1_draw_text(&m1_u8g2, 8, y_offset, 114, prn_msg, TEXT_ALIGN_LEFT);
 
 #ifdef M1_APP_WIFI_CONNECT_ENABLE
-	m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "Connect", arrowright_8x8);
+	m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "Options", arrowright_8x8);
 #else
 	m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "", NULL);
 #endif
@@ -1036,6 +982,267 @@ static bool wifi_do_connect(const char *ssid, const char *password)
 	}
 
 	return false;
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Prompt for an AP password when needed
+  * @retval true when a usable password was collected
+  */
+/*============================================================================*/
+static bool wifi_scan_ap_prompt_password(const wifi_scanlist_t *ap, char *password, uint16_t password_len)
+{
+	uint8_t pw_len;
+
+	if (ap == NULL || password == NULL || password_len == 0)
+		return false;
+
+	password[0] = '\0';
+
+	if (ap->ssid[0] == 0x00)
+	{
+		wifi_display_msg("Hidden network", "Can't use SSID");
+		vTaskDelay(pdMS_TO_TICKS(1500));
+		return false;
+	}
+
+	if (ap->encryption_mode == WIFI_AUTH_OPEN)
+		return true;
+
+	memset(password, 0, password_len);
+	pw_len = m1_vkb_get_filename("Password:", "", password);
+	if (pw_len == 0)
+		return false;
+
+	password[password_len - 1] = '\0';
+	return true;
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Connect to the selected AP using saved or prompted credentials
+  * @retval true when the AP connects successfully
+  */
+/*============================================================================*/
+static bool wifi_scan_ap_connect_selected(const wifi_scanlist_t *ap)
+{
+	wifi_credential_t cred;
+	char password[WIFI_CRED_PASS_MAX_LEN];
+
+	if (ap == NULL)
+		return false;
+
+	if (ap->ssid[0] == 0x00)
+	{
+		wifi_display_msg("Hidden network", "Use Saved menu");
+		vTaskDelay(pdMS_TO_TICKS(1500));
+		return false;
+	}
+
+	if (wifi_cred_find((const char *)ap->ssid, &cred))
+	{
+		strncpy(password, cred.password, sizeof(password) - 1);
+		password[sizeof(password) - 1] = '\0';
+		return wifi_do_connect((const char *)ap->ssid, password);
+	}
+
+	if (!wifi_scan_ap_prompt_password(ap, password, sizeof(password)))
+		return false;
+
+	return wifi_do_connect((const char *)ap->ssid, password);
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Save or forget the selected AP credentials without connecting
+  */
+/*============================================================================*/
+static void wifi_scan_ap_save_selected(const wifi_scanlist_t *ap)
+{
+	wifi_credential_t cred;
+	char password[WIFI_CRED_PASS_MAX_LEN];
+	bool saved;
+
+	if (ap == NULL)
+		return;
+
+	if (ap->ssid[0] == 0x00)
+	{
+		wifi_display_msg("Hidden network", "Can't save SSID");
+		vTaskDelay(pdMS_TO_TICKS(1500));
+		return;
+	}
+
+	if (wifi_cred_find((const char *)ap->ssid, &cred))
+	{
+		wifi_cred_delete((const char *)ap->ssid);
+		wifi_display_msg("Forgot network", (const char *)ap->ssid);
+		vTaskDelay(pdMS_TO_TICKS(1500));
+		return;
+	}
+
+	if (!wifi_scan_ap_prompt_password(ap, password, sizeof(password)))
+		return;
+
+	saved = wifi_cred_save((const char *)ap->ssid, password);
+	wifi_display_msg(saved ? "Saved network" : "Save failed", (const char *)ap->ssid);
+	vTaskDelay(pdMS_TO_TICKS(1500));
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Display a detail card for the selected AP
+  */
+/*============================================================================*/
+static void wifi_scan_ap_show_details(const wifi_scanlist_t *ap)
+{
+	S_M1_Buttons_Status this_button_status;
+	S_M1_Main_Q_t q_item;
+	BaseType_t ret;
+	char line[25];
+
+	if (ap == NULL)
+		return;
+
+	while (1)
+	{
+		m1_u8g2_firstpage();
+		m1_draw_header_bar(&m1_u8g2, "AP Details", NULL);
+		m1_draw_content_frame(&m1_u8g2, 2, 14, 124, 42);
+		u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+		m1_draw_text(&m1_u8g2, 8, 23, 114, wifi_scan_ssid_label(ap), TEXT_ALIGN_LEFT);
+		m1_draw_text(&m1_u8g2, 8, 31, 114, (const char *)ap->bssid, TEXT_ALIGN_LEFT);
+		snprintf(line, sizeof(line), "RSSI:%ddBm  Ch:%d", ap->rssi, ap->channel);
+		m1_draw_text(&m1_u8g2, 8, 39, 114, line, TEXT_ALIGN_LEFT);
+		snprintf(line, sizeof(line), "Auth:%s %s",
+			wifi_auth_mode_to_str(ap->encryption_mode),
+			wifi_channel_band_to_str(ap->channel));
+		m1_draw_text(&m1_u8g2, 8, 47, 114, line, TEXT_ALIGN_LEFT);
+		m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "Close", NULL);
+		m1_u8g2_nextpage();
+
+		ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+		if (ret == pdTRUE && q_item.q_evt_type == Q_EVENT_KEYPAD)
+		{
+			ret = xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+			if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+				this_button_status.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK ||
+				this_button_status.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+			{
+				return;
+			}
+		}
+	}
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Show safe per-AP actions for a scan result
+  * @retval 1 when the caller should redraw the scan list
+  */
+/*============================================================================*/
+static uint8_t wifi_scan_ap_options(const wifi_scanlist_t *ap)
+{
+	enum
+	{
+		WIFI_SCAN_ACT_CONNECT = 0,
+		WIFI_SCAN_ACT_SAVE,
+		WIFI_SCAN_ACT_DETAILS,
+		WIFI_SCAN_ACT_COUNT
+	};
+
+	S_M1_Buttons_Status this_button_status;
+	S_M1_Main_Q_t q_item;
+	BaseType_t ret;
+	wifi_credential_t cred;
+	const char *save_label;
+	const char *option_label;
+	uint8_t selected = 0;
+	uint8_t row_y;
+
+	if (ap == NULL)
+		return 1;
+
+	save_label = wifi_cred_find((const char *)ap->ssid, &cred) ? "Forget" : "Save";
+
+	while (1)
+	{
+		m1_u8g2_firstpage();
+		m1_draw_header_bar(&m1_u8g2, "WiFi Options", wifi_scan_ssid_label(ap));
+		m1_draw_content_frame(&m1_u8g2, 2, 14, 124, 35);
+		u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+
+		for (uint8_t row = 0; row < WIFI_SCAN_ACT_COUNT; row++)
+		{
+			if (row == WIFI_SCAN_ACT_CONNECT)
+				option_label = "Connect";
+			else if (row == WIFI_SCAN_ACT_SAVE)
+				option_label = save_label;
+			else
+				option_label = "Details";
+
+			row_y = 24 + (row * 9);
+			if (row == selected)
+			{
+				u8g2_DrawBox(&m1_u8g2, 6, row_y - 7, 116, 9);
+				u8g2_SetDrawColor(&m1_u8g2, 0);
+				m1_draw_text(&m1_u8g2, 10, row_y, 108, option_label, TEXT_ALIGN_LEFT);
+				u8g2_SetDrawColor(&m1_u8g2, 1);
+			}
+			else
+				m1_draw_text(&m1_u8g2, 10, row_y, 108, option_label, TEXT_ALIGN_LEFT);
+		}
+
+		m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "Select", NULL);
+		m1_u8g2_nextpage();
+
+		ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+		if (ret != pdTRUE || q_item.q_evt_type != Q_EVENT_KEYPAD)
+			continue;
+
+		ret = xQueueReceive(button_events_q_hdl, &this_button_status, 0);
+		if (this_button_status.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+		{
+			return 1;
+		}
+		else if (this_button_status.event[BUTTON_UP_KP_ID] == BUTTON_EVENT_CLICK)
+		{
+			if (selected > 0)
+				selected--;
+			else
+				selected = WIFI_SCAN_ACT_COUNT - 1;
+		}
+		else if (this_button_status.event[BUTTON_DOWN_KP_ID] == BUTTON_EVENT_CLICK)
+		{
+			selected++;
+			if (selected >= WIFI_SCAN_ACT_COUNT)
+				selected = 0;
+		}
+		else if (this_button_status.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK ||
+				 this_button_status.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+		{
+			if (selected == WIFI_SCAN_ACT_CONNECT)
+			{
+				wifi_scan_ap_connect_selected(ap);
+				return 1;
+			}
+			else if (selected == WIFI_SCAN_ACT_SAVE)
+			{
+				wifi_scan_ap_save_selected(ap);
+				return 1;
+			}
+			else
+			{
+				wifi_scan_ap_show_details(ap);
+				return 1;
+			}
+		}
+	}
 }
 
 
