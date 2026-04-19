@@ -193,6 +193,20 @@ make
 
 Output: `./artifacts/`
 
+### GitHub Actions
+
+The workflow at `.github/workflows/firmware-release.yml` builds the firmware on
+pull requests and pushes, then uploads the contents of `artifacts/` as a GitHub
+Actions artifact.
+
+Pushing a version tag such as `v0.1.1` also creates a GitHub Release and
+attaches the built firmware files, checksums, and a zip bundle. The pushed tag
+must match `T1000_VERSION_*` in `m1_csrc/m1_t1000_version.h`.
+
+You can also run the workflow manually from the Actions tab with
+`workflow_dispatch`. If you enable `create_release`, the workflow will publish a
+release for the current commit using the matching firmware version tag.
+
 ## Flashing
 
 ### Via qMonstatek (recommended)

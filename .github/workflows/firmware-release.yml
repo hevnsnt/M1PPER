@@ -1,0 +1,139 @@
+name: Firmware CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: Create a GitHub Release from this run
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: Release tag to create, for example v0.1.1. Leave blank to use the current firmware version.
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build firmware
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      firmware_basename: ${{ steps.meta.outputs.firmware_basename }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils-arm-none-eabi \
+            cmake \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib \
+            ninja-build \
+            python3 \
+            zip
+
+      - name: Build firmware
+        run: ./build.sh
+
+      - name: Prepare artifact metadata
+        id: meta
+        shell: bash
+        run: |
+          shopt -s nullglob
+          elf_files=(artifacts/*.elf)
+          if [ "${#elf_files[@]}" -ne 1 ]; then
+            echo "Expected exactly one ELF artifact, found ${#elf_files[@]}" >&2
+            exit 1
+          fi
+
+          firmware_basename="$(basename "${elf_files[0]}" .elf)"
+          version="${firmware_basename#M1_T-1000_v}"
+          if [ "$version" = "$firmware_basename" ]; then
+            echo "Could not derive firmware version from ${firmware_basename}" >&2
+            exit 1
+          fi
+
+          mkdir -p release-assets
+          cp artifacts/* release-assets/
+          (
+            cd release-assets
+            sha256sum * > SHA256SUMS.txt
+          )
+          zip -j "release-assets/${firmware_basename}_artifacts.zip" release-assets/*
+
+          echo "firmware_basename=${firmware_basename}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ steps.meta.outputs.version }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  release:
+    name: Create release
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve release tag
+        id: release_meta
+        shell: bash
+        run: |
+          expected_tag="v${{ needs.build.outputs.version }}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            requested_tag="${{ inputs.release_tag }}"
+            if [ -z "${requested_tag}" ]; then
+              requested_tag="${expected_tag}"
+            fi
+          else
+            requested_tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [ "${requested_tag}" != "${expected_tag}" ]; then
+            echo "Release tag ${requested_tag} does not match firmware version ${expected_tag}" >&2
+            exit 1
+          fi
+
+          echo "tag_name=${requested_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-${{ needs.build.outputs.version }}
+          path: release-assets
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
+          name: T-1000 Firmware ${{ steps.release_meta.outputs.tag_name }}
+          generate_release_notes: true
+          files: release-assets/*
+          fail_on_unmatched_files: true
