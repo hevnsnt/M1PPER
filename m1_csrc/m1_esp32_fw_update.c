@@ -29,6 +29,7 @@
 #include "m1_power_ctl.h"
 #include "m1_watchdog.h"
 #include "m1_log_debug.h"
+#include "m1_display.h"
 
 /*************************** D E F I N E S ************************************/
 
@@ -316,13 +317,19 @@ void setting_esp32_image_file(void)
 				{
 				    mh_md5_final(raw_md5);
 				    mh_hexify(raw_md5, hex_md5);
-				    // Compare md5 here
-				    uret = memcmp(hex_md5_infile, hex_md5, MD5_SIZE_ROM);
-				    if ( uret )
+				    /* SD card .bin contents must match the .md5
+				     * companion. Tampered, truncated, or wrong
+				     * file. Refuse to proceed. Previously this was
+				     * silently collapsed to 0 ("warn but don't
+				     * block") which meant a corrupt binary would
+				     * be flashed to the coprocessor. */
+				    if ( memcmp(hex_md5_infile, hex_md5, MD5_SIZE_ROM) != 0 )
 				    {
-				    	// MD5 mismatch — warn but don't block flashing
-						uret = 0;
+				    	m1_fb_close_file(&hfile_fw);
+				    	uret = M1_FW_CRC_FILE_INVALID;
+				    	break;
 				    }
+				    uret = 0;
 				} // if ( !sum )
 				else
 				{
@@ -330,6 +337,59 @@ void setting_esp32_image_file(void)
 					break;
 				}
 			} // if ( has_md5 )
+			else
+			{
+				/* No .md5 companion exists. Compute MD5 of the
+				 * SD-card .bin ourselves so we can show it on
+				 * screen and force the user to acknowledge an
+				 * unverified flash. Previously this case
+				 * proceeded silently with no integrity check. */
+				mh_md5_init(start_address, image_size);
+				sum = image_size;
+				while ( sum )
+				{
+					count = m1_fb_read_from_file(&hfile_fw, payload, ESP32_IMAGE_CHUNK_SIZE);
+					if ( !count ) {
+						uret = M1_FW_IMAGE_FILE_ACCESS_ERROR;
+						break;
+					}
+					sum -= count;
+					mh_md5_update(payload, (count + 3) & ~3);
+					m1_wdt_reset();
+				}
+				if ( sum ) {
+					m1_fb_close_file(&hfile_fw);
+					uret = M1_FW_IMAGE_FILE_ACCESS_ERROR;
+					break;
+				}
+				mh_md5_final(raw_md5);
+				mh_hexify(raw_md5, hex_md5);
+				{
+					char line2[20];
+					char line3[24];
+					snprintf(line2, sizeof(line2), "MD5: %.16s",
+					         (const char *)hex_md5);
+					snprintf(line3, sizeof(line3), "...%.16s",
+					         (const char *)hex_md5 + 16);
+					uint8_t choice = m1_message_box_choice(&m1_u8g2,
+					    "Unverified bin",
+					    line2, line3,
+					    "Flash\nAbort");
+					if (choice != 1) {
+						m1_fb_close_file(&hfile_fw);
+						uret = M1_FW_CRC_FILE_INVALID;
+						break;
+					}
+				}
+				/* Reopen file so flash loop reads from offset 0. */
+				m1_fb_close_file(&hfile_fw);
+				uret = m1_fb_open_file(&hfile_fw, pfullpath);
+				if ( uret ) {
+					uret = M1_FW_IMAGE_FILE_ACCESS_ERROR;
+					break;
+				}
+				image_size = f_size(&hfile_fw);
+			}
 #endif
 			uret = 0; // success
 		} // if ( !uret )
@@ -614,6 +674,7 @@ static esp_loader_error_t m1_fw_flash_binary(uint8_t *payload, size_t size)
     esp_loader_error_t err;
     size_t written;
     static bool init_done = false;
+    static size_t s_written_total = 0;
 
     if ( !init_done )
     {
@@ -627,10 +688,16 @@ static esp_loader_error_t m1_fw_flash_binary(uint8_t *payload, size_t size)
                 printf("If using Secure Download Mode, double check that the specified "
                        "target flash size is correct.\r\n");
             }
+            /* Failure path: ensure next attempt re-erases. Without
+             * this reset, a failed flash leaves init_done=true and
+             * the next attempt skips erase, writing wherever the
+             * previous run stopped. */
+            init_done = false;
+            s_written_total = 0;
             return err;
         } // if (err != ESP_LOADER_SUCCESS)
         printf("Start programming\r\n");
-        written = 0;
+        s_written_total = 0;
         init_done = true;
     } // if ( !init_done )
 
@@ -640,10 +707,14 @@ static esp_loader_error_t m1_fw_flash_binary(uint8_t *payload, size_t size)
         if (err != ESP_LOADER_SUCCESS)
         {
             printf("\nPacket could not be written! Error %s.\r\n", get_error_string(err));
+            /* Failure path: clear state so next attempt restarts. */
+            init_done = false;
+            s_written_total = 0;
             return err;
         }
 
-        written += size;
+        s_written_total += size;
+        written = s_written_total;
 
         int progress = (int)(((float)written / image_size) * 100);
         printf("\rProgress: %d %%", progress);
@@ -653,6 +724,7 @@ static esp_loader_error_t m1_fw_flash_binary(uint8_t *payload, size_t size)
 
     printf("\nFinished programming\r\n");
     init_done = false; // reset
+    s_written_total = 0;
 
 #ifdef MD5_ENABLED
     err = esp_loader_flash_verify();
