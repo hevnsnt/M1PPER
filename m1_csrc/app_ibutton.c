@@ -128,13 +128,18 @@ static bool ow_reset(void)
     ow_pin_release();
     ow_delay_us(5U);
 
-    __disable_irq();
+    /* Mask only IRQs at or below configMAX_SYSCALL_INTERRUPT_PRIORITY so
+     * the high-priority USB and SDMMC handlers keep running while we
+     * bit-bang microsecond-accurate 1-Wire timing. configMAX_SYSCALL_*
+     * is already in the FreeRTOS-port format (top byte). */
+    uint32_t saved_basepri = __get_BASEPRI();
+    __set_BASEPRI(configMAX_SYSCALL_INTERRUPT_PRIORITY);
     ow_pin_low();
     ow_delay_us(OW_RESET_LOW_US);
     ow_pin_release();
     ow_delay_us(OW_RESET_RELEASE_US);
     presence = (ow_pin_read() == 0U);
-    __enable_irq();
+    __set_BASEPRI(saved_basepri);
 
     ow_delay_us(OW_RESET_RECOVER_US);
     return presence;
@@ -142,7 +147,12 @@ static bool ow_reset(void)
 
 static void ow_write_bit(uint8_t bit)
 {
-    __disable_irq();
+    /* Mask only IRQs at or below configMAX_SYSCALL_INTERRUPT_PRIORITY so
+     * the high-priority USB and SDMMC handlers keep running while we
+     * bit-bang microsecond-accurate 1-Wire timing. configMAX_SYSCALL_*
+     * is already in the FreeRTOS-port format (top byte). */
+    uint32_t saved_basepri = __get_BASEPRI();
+    __set_BASEPRI(configMAX_SYSCALL_INTERRUPT_PRIORITY);
     if (bit & 1U)
     {
         ow_pin_low();
@@ -157,19 +167,24 @@ static void ow_write_bit(uint8_t bit)
         ow_pin_release();
         ow_delay_us(OW_WRITE0_REC_US);
     }
-    __enable_irq();
+    __set_BASEPRI(saved_basepri);
 }
 
 static uint8_t ow_read_bit(void)
 {
     uint8_t bit;
-    __disable_irq();
+    /* Mask only IRQs at or below configMAX_SYSCALL_INTERRUPT_PRIORITY so
+     * the high-priority USB and SDMMC handlers keep running while we
+     * bit-bang microsecond-accurate 1-Wire timing. configMAX_SYSCALL_*
+     * is already in the FreeRTOS-port format (top byte). */
+    uint32_t saved_basepri = __get_BASEPRI();
+    __set_BASEPRI(configMAX_SYSCALL_INTERRUPT_PRIORITY);
     ow_pin_low();
     ow_delay_us(OW_READ_LOW_US);
     ow_pin_release();
     ow_delay_us(OW_READ_SAMPLE_US);
     bit = ow_pin_read();
-    __enable_irq();
+    __set_BASEPRI(saved_basepri);
     ow_delay_us(OW_READ_REC_US);
     return bit;
 }
@@ -408,7 +423,14 @@ static int ibutton_poll_buttons(uint32_t wait_ms)
 
     if (main_q_hdl == NULL) return 0;
 
-    ret = xQueueReceive(main_q_hdl, &q_item, pdMS_TO_TICKS(wait_ms));
+    /* portMAX_DELAY is already a tick value; pdMS_TO_TICKS would overflow
+     * when wait_ms == 0xFFFFFFFF, degrading wait-forever into a busy
+     * spin. Pass it straight through to xQueueReceive in that case. */
+    TickType_t ticks = (wait_ms == portMAX_DELAY)
+        ? portMAX_DELAY
+        : pdMS_TO_TICKS(wait_ms);
+
+    ret = xQueueReceive(main_q_hdl, &q_item, ticks);
     if (ret != pdTRUE) return 0;
     if (q_item.q_evt_type != Q_EVENT_KEYPAD) return 0;
     if (xQueueReceive(button_events_q_hdl, &btn, 0) != pdTRUE) return 0;
