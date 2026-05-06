@@ -486,6 +486,9 @@ target_sources(m1_01 INTERFACE
     ../../m1_csrc/m1_badbt.c
     # Games and built-in apps
     ../../m1_csrc/m1_games.c
+    ../../m1_csrc/m1_input.c
+    ../../m1_csrc/m1_rand.c
+    ../../m1_csrc/m1_app_runtime.c
     ../../m1_csrc/game_snake.c
     ../../m1_csrc/game_tetris.c
     ../../m1_csrc/game_trex.c
