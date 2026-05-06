@@ -698,6 +698,20 @@ static void tx_set_random_mac(void)
     }
     hexmac[12] = '\0';
 
+    /* CRITICAL: actually rotate the on-air BD_ADDR. AT+BLEADVPARAM
+     * with own_addr_type=1 alone does NOT change the broadcaster's
+     * source MAC; ESP32-AT continues to advertise from the chip's
+     * factory MAC. AT+BLEADDR=1,"<hexmac>" rewrites the random
+     * static device address used by NimBLE before each new advert.
+     * Without this command, "Confusion Mode" rotates only the
+     * payload while the on-air MAC stays constant -- iOS Find-My
+     * filters dedup on (MAC, payload) so the feature was a no-op. */
+    char addr_cmd[48];
+    snprintf(addr_cmd, sizeof(addr_cmd),
+             "AT+BLEADDR=1,\"%s\"\r\n", hexmac);
+    at_send(addr_cmd);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
     char cmd[64];
     /* min=32, max=64, type=3 (non-conn), own_addr_type=1 (random),
      * channel_map=7 (37,38,39), filter=0, peer_addr=hexmac          */
