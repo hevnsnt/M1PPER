@@ -890,7 +890,7 @@ S_M1_Menu_t menu_HexViewer =
 
 S_M1_Menu_t menu_Apps_Browser =
 {
-    "Apps Browser", game_apps_browser_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+    "Apps Browser", m1_app_browser_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
 };
 
 S_M1_Menu_t menu_RGBBacklight =
