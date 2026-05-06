@@ -628,6 +628,15 @@ bool ReadIni(void)
     ReturnCode err = RFAL_ERR_NONE;
     bool fast_a_only = (s_poll_profile == NFC_POLL_PROFILE_FAST_A);
 
+    /* 0) Crypto-1 known-answer test.  If the cipher is broken we refuse
+     * to bring up MIFARE-aware paths.  The poller still works for the
+     * non-MIFARE techs (NTAG, T4T, NFC-V, ST25TB), but MIFARE Classic
+     * authentication will return false at the entry point. */
+    if (!crypto1_self_test()) {
+        platformLog("[NFC] CRYPTO-1 KAT FAILED — MIFARE Classic disabled\r\n");
+        /* Continue anyway so non-MIFARE features still work. */
+    }
+
     /* 1) RFAL Initialize (retry 2 times) */
     for (int i = 0; i < 2; i++) {
         err = rfalNfcInitialize();

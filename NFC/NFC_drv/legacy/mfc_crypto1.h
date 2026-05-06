@@ -43,6 +43,11 @@ uint8_t crypto1_parity_bit(crypto1_state_t *s);
 /* PRNG successor: step the MIFARE Classic PRNG n times */
 uint32_t mfc_prng_successor(uint32_t x, uint32_t n);
 
+/* Crypto-1 self-test (KAT) — call once at boot. Returns true on success.
+ * If this returns false the cipher is broken at the bit level and the
+ * NFC subsystem should refuse to interoperate with MIFARE Classic cards. */
+bool crypto1_self_test(void);
+
 /* --- High-level MIFARE Classic operations --- */
 
 #define MFC_KEY_LEN         6
