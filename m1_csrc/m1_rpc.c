@@ -47,6 +47,7 @@
 #include "FreeRTOS_CLI.h"
 #include "m1_power_ctl.h"
 #include "m1_sys_init.h"
+#include "m1_crypto.h"  /* m1_crypto_trng_fill — Phase 5.4 pairing nonce */
 
 /*************************** D E F I N E S ************************************/
 
@@ -132,6 +133,36 @@ static S_RPC_EspUpdateState s_esp_update;
 
 /* File write state */
 static S_RPC_FileWriteState s_file_write;
+
+/* -----------------------------------------------------------------------
+ *  Pairing state (Phase 5.4)
+ *
+ *  - s_pair_armed         : false on every reboot. Set true after a
+ *                           successful PAIR_CONFIRM. Re-checked by every
+ *                           gated handler.
+ *  - s_pair_armed_until   : tick-count deadline; armed flag treated as
+ *                           false once the current tick passes this.
+ *  - s_pair_pending_nonce : 16-byte challenge minted by PAIR_REQUEST,
+ *                           waiting for the host to echo via
+ *                           PAIR_CONFIRM.
+ *  - s_pair_nonce_valid   : true once a PAIR_REQUEST has been issued
+ *                           AND the 30 s window is still open.
+ *  - s_pair_nonce_until   : deadline for the pairing window.
+ *  - s_pair_display_code  : 9-byte ASCII buffer ("XXXXXXXX\0") with the
+ *                           first 8 hex chars of the nonce so the LCD
+ *                           layer (or, for now, a debug printf) can show
+ *                           the user the value to type back in the host.
+ * --------------------------------------------------------------------- */
+#define RPC_PAIR_NONCE_SIZE         16u
+#define RPC_PAIR_WINDOW_MS          30000u
+#define RPC_PAIR_ARMED_MS          (5u * 60u * 1000u)
+
+static volatile bool     s_pair_armed         = false;
+static volatile uint32_t s_pair_armed_until   = 0;
+static uint8_t           s_pair_pending_nonce[RPC_PAIR_NONCE_SIZE];
+static volatile bool     s_pair_nonce_valid   = false;
+static volatile uint32_t s_pair_nonce_until   = 0;
+char                     m1_rpc_pair_display_code[9] = ""; /* exposed for LCD overlay */
 
 /* Deferred command processing — slow SD-card operations (delete, mkdir, etc.)
  * are copied here and processed in rpc_task instead of inline in the CDC task,
@@ -527,6 +558,146 @@ static void rpc_parse_byte(uint8_t byte)
 /*                  C O M M A N D   D I S P A T C H E R                       */
 /*============================================================================*/
 
+/*============================================================================*/
+/*               P A I R I N G   /   A D M I N - G A T E   (Phase 5.4)        */
+/*============================================================================*/
+
+/* Returns true if the host is currently allowed to issue gated commands
+ * (FW_UPDATE_*, FW_BANK_SWAP, FW_BANK_ERASE, FW_DFU_ENTER, REBOOT,
+ * POWER_OFF, FILE_WRITE_*, FILE_DELETE, FILE_MKDIR, CLI_EXEC). Re-arms
+ * the deadline on every successful check so a busy host stays paired. */
+static bool rpc_admin_check_armed(void)
+{
+    if (!s_pair_armed) return false;
+    uint32_t now = HAL_GetTick();
+    if ((int32_t)(now - s_pair_armed_until) > 0)
+    {
+        /* Window expired. */
+        s_pair_armed = false;
+        M1_LOG_I(M1_LOGDB_TAG, "Pairing window expired — re-pair required\r\n");
+        return false;
+    }
+    /* Refresh deadline so an active session doesn't hit the 5-minute
+     * cliff while the host is mid-flash. */
+    s_pair_armed_until = now + RPC_PAIR_ARMED_MS;
+    return true;
+}
+
+/* Returns true if `cmd` is a state-changing command that requires the
+ * host to be paired. PAIR_REQUEST and PAIR_CONFIRM are explicitly NOT
+ * gated (the whole point of pairing is that they get through). */
+static bool rpc_cmd_requires_pairing(uint8_t cmd)
+{
+    switch (cmd)
+    {
+        /* Firmware update */
+        case RPC_CMD_FW_UPDATE_START:
+        case RPC_CMD_FW_UPDATE_DATA:
+        case RPC_CMD_FW_UPDATE_FINISH:
+        case RPC_CMD_FW_BANK_SWAP:
+        case RPC_CMD_FW_BANK_ERASE:
+        case RPC_CMD_FW_DFU_ENTER:
+        /* Filesystem write/destroy */
+        case RPC_CMD_FILE_WRITE_START:
+        case RPC_CMD_FILE_WRITE_DATA:
+        case RPC_CMD_FILE_WRITE_FINISH:
+        case RPC_CMD_FILE_DELETE:
+        case RPC_CMD_FILE_MKDIR:
+        /* Power */
+        case RPC_CMD_REBOOT:
+        case RPC_CMD_POWER_OFF:
+        /* CLI / ESP flashing (the loaded payload can do anything) */
+        case RPC_CMD_CLI_EXEC:
+        case RPC_CMD_ESP_UPDATE_START:
+        case RPC_CMD_ESP_UPDATE_DATA:
+        case RPC_CMD_ESP_UPDATE_FINISH:
+        case RPC_CMD_ESP_UART_SNOOP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* PAIR_REQUEST handler: mint a TRNG nonce, open the pairing window. */
+static void rpc_handle_pair_request(const S_RPC_Frame *f)
+{
+    /* Generate fresh challenge from TRNG. */
+    if (!m1_crypto_trng_fill(s_pair_pending_nonce, RPC_PAIR_NONCE_SIZE))
+    {
+        M1_LOG_E(M1_LOGDB_TAG, "PAIR_REQUEST: TRNG unavailable\r\n");
+        m1_rpc_send_nack(f->seq, RPC_ERR_FLASH_ERROR);
+        return;
+    }
+
+    s_pair_nonce_valid = true;
+    s_pair_nonce_until = HAL_GetTick() + RPC_PAIR_WINDOW_MS;
+
+    /* Format first 8 hex chars for on-screen display. The LCD layer
+     * (m1_app_manager / settings UI) renders m1_rpc_pair_display_code
+     * when non-empty — until that hookup lands we still log to UART so
+     * a developer can complete the pairing from the debug console. */
+    static const char hex[] = "0123456789ABCDEF";
+    for (int i = 0; i < 4; i++)
+    {
+        uint8_t b = s_pair_pending_nonce[i];
+        m1_rpc_pair_display_code[i * 2 + 0] = hex[(b >> 4) & 0xF];
+        m1_rpc_pair_display_code[i * 2 + 1] = hex[b & 0xF];
+    }
+    m1_rpc_pair_display_code[8] = '\0';
+    M1_LOG_W(M1_LOGDB_TAG, "PAIR REQUEST — type code %s into qMonstatek (window 30s)\r\n",
+             m1_rpc_pair_display_code);
+
+    /* Reply with the full 16-byte nonce so the host can echo it back. */
+    m1_rpc_send_frame(RPC_CMD_PAIR_NONCE, f->seq,
+                      s_pair_pending_nonce, RPC_PAIR_NONCE_SIZE);
+}
+
+/* PAIR_CONFIRM handler: host echoes the nonce; on match, arm the gate. */
+static void rpc_handle_pair_confirm(const S_RPC_Frame *f)
+{
+    /* Window must still be open. */
+    if (!s_pair_nonce_valid ||
+        (int32_t)(HAL_GetTick() - s_pair_nonce_until) > 0)
+    {
+        M1_LOG_W(M1_LOGDB_TAG, "PAIR_CONFIRM: window already closed\r\n");
+        s_pair_nonce_valid = false;
+        m1_rpc_pair_display_code[0] = '\0';
+        m1_rpc_send_nack(f->seq, RPC_ERR_PAIR_REJECTED);
+        return;
+    }
+
+    if (f->len != RPC_PAIR_NONCE_SIZE)
+    {
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
+
+    /* Constant-time compare so an attacker can't time-optimize the
+     * 16-byte search. */
+    uint8_t diff = 0;
+    for (uint32_t i = 0; i < RPC_PAIR_NONCE_SIZE; i++)
+        diff |= s_pair_pending_nonce[i] ^ f->payload[i];
+
+    /* Single-shot — once we've reached this point the nonce burns
+     * regardless of outcome. */
+    s_pair_nonce_valid = false;
+    memset(s_pair_pending_nonce, 0, sizeof(s_pair_pending_nonce));
+    m1_rpc_pair_display_code[0] = '\0';
+
+    if (diff != 0)
+    {
+        M1_LOG_W(M1_LOGDB_TAG, "PAIR_CONFIRM: nonce mismatch\r\n");
+        m1_rpc_send_nack(f->seq, RPC_ERR_PAIR_REJECTED);
+        return;
+    }
+
+    s_pair_armed = true;
+    s_pair_armed_until = HAL_GetTick() + RPC_PAIR_ARMED_MS;
+    M1_LOG_I(M1_LOGDB_TAG, "PAIR_CONFIRM: host paired (5 min)\r\n");
+    m1_rpc_send_ack(f->seq);
+}
+
+
 /**
  * @brief  Route a validated frame to the appropriate handler.
  */
@@ -539,6 +710,20 @@ static void rpc_dispatch_frame(const S_RPC_Frame *frame)
     if (!m1_rpc_active)
     {
         m1_rpc_active = true;
+    }
+
+    /* ----- Phase 5.4 admin gate -------------------------------------
+     * Most state-changing commands require the host to be paired. The
+     * pair handshake itself (PAIR_REQUEST / PAIR_CONFIRM) and harmless
+     * read-only commands (PING, GET_DEVICE_INFO, FILE_LIST, FILE_READ,
+     * SCREEN_*, BUTTON_*, FW_INFO, ESP_INFO) flow through unchanged. */
+    if (rpc_cmd_requires_pairing(frame->cmd) && !rpc_admin_check_armed())
+    {
+        M1_LOG_W(M1_LOGDB_TAG,
+                 "Refusing cmd 0x%02X — host not paired (use RPC_CMD_PAIR_REQUEST)\r\n",
+                 frame->cmd);
+        m1_rpc_send_nack(frame->seq, RPC_ERR_NOT_PAIRED);
+        return;
     }
 
     switch (frame->cmd)
@@ -632,6 +817,10 @@ static void rpc_dispatch_frame(const S_RPC_Frame *frame)
         }
         break;
     case RPC_CMD_ESP_UART_SNOOP:    rpc_handle_esp_uart_snoop(frame);    break;
+
+    /* Pairing (Phase 5.4) — never gated. */
+    case RPC_CMD_PAIR_REQUEST:      rpc_handle_pair_request(frame);     break;
+    case RPC_CMD_PAIR_CONFIRM:      rpc_handle_pair_confirm(frame);     break;
 
     default:
         m1_rpc_send_nack(frame->seq, RPC_ERR_UNKNOWN_CMD);

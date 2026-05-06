@@ -38,6 +38,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
+#include <stdlib.h>
+#include "ff.h"
 
 /* Externals owned by m1_infrared.c */
 extern QueueHandle_t main_q_hdl;
@@ -60,14 +62,14 @@ extern QueueHandle_t button_events_q_hdl;
  *---------------------------------------------------------------------------*/
 typedef struct
 {
-    const char *brand;     /* short label for UI */
-    uint8_t     protocol;  /* IRMP_*_PROTOCOL */
+    char        brand[24];   /* short label for UI; copied so SD path owns its own string */
+    uint8_t     protocol;    /* IRMP_*_PROTOCOL */
     uint16_t    address;
     uint16_t    command;
-    uint8_t     repeats;   /* number of frames to send (1 = single, >=2 = with auto-repeat) */
+    uint8_t     repeats;     /* 1 = single, >=2 = with auto-repeat */
 } tvbgone_code_t;
 
-static const tvbgone_code_t s_codes[] =
+static const tvbgone_code_t s_default_codes[] =
 {
     /* NEC family --------------------------------------------------------- */
     { "Samsung",    IRMP_NEC_PROTOCOL,        0x0707, 0x02FD, 2 },
@@ -81,21 +83,76 @@ static const tvbgone_code_t s_codes[] =
     { "Insignia",   IRMP_NEC_PROTOCOL,        0xBB44, 0xDA25, 2 },
     { "Element",    IRMP_NEC_PROTOCOL,        0xFFFF, 0xA25D, 2 },
     { "Sansui",     IRMP_NEC_PROTOCOL,        0x0202, 0x01FE, 2 },
-
-    /* Panasonic / Kaseikyo (48-bit, IRMP carries address+command split) -- */
     { "Panasonic",  IRMP_KASEIKYO_PROTOCOL,   0x5AA5, 0x002D, 2 },
-
-    /* Sharp / Denon ------------------------------------------------------ */
     { "Sharp",      IRMP_DENON_PROTOCOL,      0x0001, 0x00CB, 2 },
-
-    /* Philips RC-5 ------------------------------------------------------- */
     { "Philips",    IRMP_RC5_PROTOCOL,        0x0000, 0x000C, 2 },
-
-    /* Sony SIRC (12-bit then 15-bit older sets) -------------------------- */
     { "Sony Bravia",IRMP_SIRCS_PROTOCOL,      0x0001, 0x0095, 3 },
     { "Sony older", IRMP_SIRCS_PROTOCOL,      0x0001, 0x0015, 3 },
 };
-#define TVBGONE_CODE_COUNT  ((uint8_t)(sizeof(s_codes) / sizeof(s_codes[0])))
+#define TVBGONE_DEFAULT_COUNT  ((uint8_t)(sizeof(s_default_codes) / sizeof(s_default_codes[0])))
+
+/* Runtime DB filled either from /IR/tvbgone.txt or the in-flash defaults.
+ * audit 07 finding "TV-B-Gone code DB from SD".  Fallback path keeps
+ * existing behavior intact when the SD file is missing or invalid. */
+#define TVBGONE_RUNTIME_MAX    96U
+static tvbgone_code_t s_runtime_codes[TVBGONE_RUNTIME_MAX];
+static const tvbgone_code_t *s_codes        = s_default_codes;
+static uint8_t               s_codes_count  = TVBGONE_DEFAULT_COUNT;
+#define TVBGONE_CODE_COUNT  s_codes_count
+#define TVBGONE_SD_DB_PATH  "0:/IR/tvbgone.txt"
+
+static bool tvbgone_parse_line(const char *line, tvbgone_code_t *out)
+{
+    const char *p = line;
+    const char *brand_start;
+    size_t brand_len;
+    char *endp;
+    long protocol_l, address_l, command_l, repeats_l;
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0' || *p == '#' || *p == '\r' || *p == '\n') return false;
+    brand_start = p;
+    while (*p && *p != ',') p++;
+    if (*p != ',') return false;
+    brand_len = (size_t)(p - brand_start);
+    if (brand_len == 0U || brand_len >= sizeof(out->brand)) return false;
+    p++;
+    protocol_l = strtol(p, &endp, 0); if (endp == p || *endp != ',') return false; p = endp + 1;
+    address_l  = strtol(p, &endp, 0); if (endp == p || *endp != ',') return false; p = endp + 1;
+    command_l  = strtol(p, &endp, 0); if (endp == p || *endp != ',') return false; p = endp + 1;
+    repeats_l  = strtol(p, &endp, 0); if (endp == p) return false;
+    if (protocol_l < 0 || protocol_l > 0x7F)   return false;
+    if (address_l  < 0 || address_l  > 0xFFFF) return false;
+    if (command_l  < 0 || command_l  > 0xFFFF) return false;
+    if (repeats_l  < 1) repeats_l = 1;
+    if (repeats_l  > 8) repeats_l = 8;
+    memcpy(out->brand, brand_start, brand_len);
+    out->brand[brand_len] = '\0';
+    out->protocol = (uint8_t)protocol_l;
+    out->address  = (uint16_t)address_l;
+    out->command  = (uint16_t)command_l;
+    out->repeats  = (uint8_t)repeats_l;
+    return true;
+}
+
+static void tvbgone_try_load_sd_db(void)
+{
+    static bool loaded_once = false;
+    if (loaded_once) return;
+    loaded_once = true;
+    FIL fp;
+    if (f_open(&fp, TVBGONE_SD_DB_PATH, FA_READ | FA_OPEN_EXISTING) != FR_OK) return;
+    char line[96];
+    uint8_t parsed = 0U;
+    while (f_gets(line, sizeof(line), &fp) != NULL && parsed < TVBGONE_RUNTIME_MAX) {
+        if (tvbgone_parse_line(line, &s_runtime_codes[parsed])) parsed++;
+    }
+    f_close(&fp);
+    if (parsed > 0U) {
+        s_codes = s_runtime_codes;
+        s_codes_count = parsed;
+    }
+}
 
 /* Inter-brand gap (ms).  The IRSND auto-repeat already inserts protocol
  * specific repeat-frame pauses (~108ms for NEC, ~45ms for SIRC) so we only
@@ -415,6 +472,9 @@ static bool tvbgone_blast_all(void)
 void app_tvbgone_run(void)
 {
     bool repeat;
+
+    /* audit 07: try /IR/tvbgone.txt before falling back to in-flash list. */
+    tvbgone_try_load_sd_db();
 
     tvbgone_flush_queue();
     infrared_encode_sys_init();

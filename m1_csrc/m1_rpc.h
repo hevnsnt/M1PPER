@@ -91,6 +91,48 @@
 #define RPC_CMD_ESP_UART_SNOOP_RESP 0x63
 #define RPC_CMD_DEBUG_LOG       0x64    /* Unsolicited debug log text from firmware */
 
+/* ── Pairing (0x70–0x7F) ── Phase 5.4 host-pairing handshake.
+ *
+ * Most state-changing commands (FW_UPDATE_*, FW_BANK_SWAP, FW_BANK_ERASE,
+ * FW_DFU_ENTER, REBOOT, POWER_OFF, FILE_WRITE_*, FILE_DELETE,
+ * FILE_MKDIR, CLI_EXEC) refuse to run unless the host is "paired" —
+ * meaning the user has explicitly approved the host on this device.
+ *
+ * Flow:
+ *   1. Host sends RPC_CMD_PAIR_REQUEST.
+ *   2. Device generates a one-shot 16-byte challenge from the on-chip
+ *      TRNG, surfaces the first 8 hex chars in s_pair_display_code
+ *      (visible to a future on-screen prompt; for now logged to UART
+ *      so the user can read the device's debug console), starts a
+ *      30-second pairing window, and replies RPC_CMD_PAIR_NONCE with
+ *      the entire 16-byte challenge.
+ *   3. Host shows the first 8 hex chars to the user. User reads them
+ *      from the device LCD and confirms in the host UI.
+ *   4. Host sends RPC_CMD_PAIR_CONFIRM with the SAME 16-byte nonce
+ *      back to the device (it cannot have got the correct nonce
+ *      without the user reading the LCD).
+ *   5. Device compares the echoed nonce against its stored challenge;
+ *      on match, sets the per-boot armed flag and ACKs. Subsequent
+ *      gated commands now succeed for 5 minutes (re-armed by any
+ *      successful gated command).
+ *
+ * This is a simplification of the full per-host pairing key flow
+ * called out in PLAN.md Phase 5.4 — it provides the on-device-consent
+ * boundary required to block "pwn-by-cable" without per-host key
+ * persistence. A future commit can extend RPC_CMD_PAIR_CONFIRM to
+ * return a per-host 32-byte HMAC key so subsequent commands can be
+ * cryptographically authenticated, eliminating the 5-minute window. */
+#define RPC_CMD_PAIR_REQUEST    0x70
+#define RPC_CMD_PAIR_NONCE      0x71
+#define RPC_CMD_PAIR_CONFIRM    0x72
+
+#define RPC_ERR_NOT_PAIRED      0x0C    /* Gated command attempted while
+                                         * the host is not paired or the
+                                         * 5-minute window has lapsed. */
+#define RPC_ERR_PAIR_REJECTED   0x0D    /* PAIR_CONFIRM nonce did not
+                                         * match or pairing window had
+                                         * already closed. */
+
 /* ── Button IDs (match m1_system.h) ── */
 #define RPC_BUTTON_OK           0
 #define RPC_BUTTON_UP           1
@@ -256,6 +298,13 @@ void m1_rpc_send_nack(uint8_t seq, uint8_t error_code);
 /*************************** E X T E R N S ************************************/
 
 extern S_RPC_ScreenStream rpc_screen_stream;
+
+/* Phase 5.4: ASCII buffer containing the first 8 hex chars of the
+ * current pairing nonce, or empty string when no pairing is in
+ * progress. The display layer can use this to render an on-screen
+ * "type this code in qMonstatek" prompt. While the pairing window
+ * is closed (the only safe state) the buffer is empty. */
+extern char m1_rpc_pair_display_code[9];
 
 /**
  * @brief  RPC mode flag — set true when first valid RPC frame is received.
