@@ -58,6 +58,7 @@ S_M1_file_info *m1_fb_display(S_M1_Buttons_Status *button_status);
 FRESULT m1_fb_listing(const char *dir_name);
 uint8_t m1_fb_dyn_strcat(char *buffer, uint8_t num, const char *format, ...);
 uint8_t m1_fb_open_new_file(FIL *file, const char *filename);
+uint8_t m1_fb_open_append_or_create(FIL *file, const char *filename);
 uint8_t m1_fb_open_file(FIL *file, const char *filename);
 uint8_t m1_fb_open_dir(DIR *dir, const char *directory);
 uint8_t m1_fb_make_dir(const char *directory);
