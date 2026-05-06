@@ -48,15 +48,19 @@ logs/
 
 # Build helper scripts (machine-specific)
 do_build.ps1
+do_final_build.ps1
 build.bat
+build_check.ps1
+build_stats.ps1
 build_out.txt
 build_lfrfid.txt
 build_lfrfid2.txt
 appsplan.md
 
-# Claude / AI assistant
+# AI assistant config (private, machine-specific)
 .claude/
 CLAUDE.md
+AGENTS.md
 
 # Local project directories (not part of firmware)
 qMonstatek/
