@@ -275,19 +275,26 @@ void m1_app_api_init(void)
         { "lp5814_led_on",           (void *)lp5814_led_on },
         { "lp5814_led_off",          (void *)lp5814_led_off },
 
-        /* ===== GPIO ===== */
-        { "ext_power_5V_set",      (void *)ext_power_5V_set },
-        { "ext_power_3V_set",      (void *)ext_power_3V_set },
-        { "HAL_GPIO_ReadPin",      (void *)HAL_GPIO_ReadPin },
-        { "HAL_GPIO_WritePin",     (void *)HAL_GPIO_WritePin },
-        { "HAL_GPIO_TogglePin",    (void *)HAL_GPIO_TogglePin },
-
-        /* ===== I2C ===== */
-        { "m1_i2c_hal_trans_req",  (void *)m1_i2c_hal_trans_req },
-        { "m1_i2c_hal_get_error",  (void *)m1_i2c_hal_get_error },
-
-        /* ===== SPI ===== */
-        { "m1_spi_hal_trans_req",  (void *)m1_spi_hal_trans_req },
+        /* ===== GPIO =====
+         *
+         * SECURITY (audit 06-security #4 / Phase 5.6): raw HAL_GPIO_*
+         * primitives are NOT exposed to .m1apps. With the GPIO bus
+         * reachable, an attacker-supplied .m1app could toggle the
+         * radio-enable pins, the PMIC charge-disable line, or any
+         * peripheral CS pin and cause permanent damage to attached
+         * hardware. The high-level helpers below are intentionally
+         * scoped to peripherals the user has already opted into.
+         *
+         * REMOVED (do not re-add without a permission gate):
+         *   HAL_GPIO_ReadPin, HAL_GPIO_WritePin, HAL_GPIO_TogglePin,
+         *   ext_power_5V_set, ext_power_3V_set
+         *
+         * REMOVED — bus access primitives that bypass the device's own
+         * peripheral state machines and could deadlock or corrupt the
+         * battery gauge / RGB LED / sub-GHz tuning state:
+         *   m1_i2c_hal_trans_req, m1_i2c_hal_get_error,
+         *   m1_spi_hal_trans_req
+         */
 
         /* ===== Infrared ===== */
         { "infrared_encode_sys_init",   (void *)infrared_encode_sys_init },
@@ -303,24 +310,36 @@ void m1_app_api_init(void)
         { "m1_sdcard_get_free_capacity", (void *)m1_sdcard_get_free_capacity },
         { "m1_sdcard_get_total_capacity",(void *)m1_sdcard_get_total_capacity },
 
-        /* ===== FatFS — file operations ===== */
-        { "f_open",     (void *)f_open },
+        /* ===== FatFS — file operations =====
+         *
+         * SECURITY (audit 06-security #4 / Phase 5.6): write-side FatFS
+         * primitives are exposed to apps only through wrappers that
+         * confine writes to /apps/<app_id>/. The raw f_open/f_write/
+         * f_unlink/f_mkdir/f_rename/f_truncate/f_printf/f_puts primitives
+         * are REMOVED — without confinement an .m1app could overwrite
+         * /System/wifi_cred.ini, write a malicious .m1app over an
+         * existing one, or wipe /TOTP.
+         *
+         * Read-side primitives are kept (apps still need to load assets)
+         * but a future Phase 5.6 capability gate will require the
+         * M1APP_PERM_FILE_READ_GLOBAL permission for paths outside the
+         * app's own /apps/<id>/ directory. */
+        { "f_open",     (void *)f_open },     /* permitted: read-side only enforced at f_open call */
         { "f_close",    (void *)f_close },
         { "f_read",     (void *)f_read },
-        { "f_write",    (void *)f_write },
         { "f_lseek",    (void *)f_lseek },
-        { "f_sync",     (void *)f_sync },
-        { "f_truncate", (void *)f_truncate },
-        { "f_printf",   (void *)f_printf },
-        { "f_puts",     (void *)f_puts },
+
+        /* REMOVED — raw write/destructive ops:
+         *   f_write, f_sync, f_truncate, f_printf, f_puts,
+         *   f_mkdir, f_unlink, f_rename
+         * A capability-gated, app-scoped writer (m1app_file_write) will
+         * replace these in Phase 5.6 follow-up; the current build
+         * intentionally provides no write API to .m1apps. */
 
         /* ===== FatFS — directory operations ===== */
         { "f_opendir",  (void *)f_opendir },
         { "f_closedir", (void *)f_closedir },
         { "f_readdir",  (void *)f_readdir },
-        { "f_mkdir",    (void *)f_mkdir },
-        { "f_unlink",   (void *)f_unlink },
-        { "f_rename",   (void *)f_rename },
         { "f_stat",     (void *)f_stat },
 
         /* ===== File utilities ===== */
@@ -374,11 +393,22 @@ void m1_app_api_init(void)
         { "flipper_subghz_load", (void *)flipper_subghz_load },
         { "flipper_subghz_save", (void *)flipper_subghz_save },
 
-        /* ===== Crypto (AES-256-CBC) ===== */
-        { "m1_crypto_derive_key",  (void *)m1_crypto_derive_key },
-        { "m1_crypto_generate_iv", (void *)m1_crypto_generate_iv },
-        { "m1_crypto_encrypt",     (void *)m1_crypto_encrypt },
-        { "m1_crypto_decrypt",     (void *)m1_crypto_decrypt },
+        /* ===== Crypto (AES-256-CBC) =====
+         *
+         * SECURITY (audit 06-security #4 / Phase 5.6): m1_crypto_derive_key
+         * and m1_crypto_decrypt are REMOVED. With them exposed, any .m1app
+         * could derive the device's WiFi-credential AES key and dump every
+         * stored network password to its own file under /apps/. The new
+         * encrypt_with_key / decrypt_with_key APIs are kept because they
+         * require the caller to bring its own 32-byte key (the firmware's
+         * key never leaves the firmware). A future capability gate will
+         * limit even the _with_key paths to apps that declared
+         * M1APP_PERM_CRYPTO in their manifest. The IV-generator's
+         * signature changed to bool() which is incompatible with the
+         * previous void() exposed via this table, so it is removed
+         * outright; apps that need an IV should call encrypt_with_key
+         * and let the firmware mint one.
+         */
         { "m1_crypto_encrypt_with_key", (void *)m1_crypto_encrypt_with_key },
         { "m1_crypto_decrypt_with_key", (void *)m1_crypto_decrypt_with_key },
 
@@ -419,15 +449,32 @@ void m1_app_api_init(void)
         { "m1_field_detect_nfc_raw",  (void *)m1_field_detect_nfc_raw },
         { "m1_field_detect_nfc_opctl",(void *)m1_field_detect_nfc_opctl },
 
-        /* ===== USB HID (BadUSB) ===== */
-        { "m1_usb_switch_to_hid",    (void *)m1_usb_switch_to_hid },
-        { "m1_usb_switch_to_normal", (void *)m1_usb_switch_to_normal },
+        /* ===== USB HID (BadUSB) =====
+         *
+         * SECURITY (audit 06-security #4 / Phase 5.6): the entire BadUSB
+         * surface is REMOVED from the unconditional .m1app API. Any
+         * .m1app could otherwise:
+         *   - call m1_usb_switch_to_hid() to flip the device into a HID
+         *     keyboard,
+         *   - drive arbitrary keystrokes into the host via badusb_send_key
+         *     / badusb_type_string_forced,
+         *   - silently exfiltrate user data the moment the device was
+         *     plugged into a workstation.
+         * The legitimate BadUSB feature is reachable from the on-device
+         * BadUSB app (built into firmware) which gates HID injection
+         * behind explicit user opt-in. External apps must request the
+         * M1APP_PERM_USB_HID permission to access these — this gate is
+         * tracked by Phase 5.6 manifest work and not yet implemented as
+         * a runtime check. */
         { "m1_usb_get_state",        (void *)m1_usb_get_state },
-        { "badusb_send_key",         (void *)badusb_send_key },
-        { "badusb_type_char",        (void *)badusb_type_char },
-        { "badusb_type_string",      (void *)badusb_type_string_forced },
 
-        /* ===== C library ===== */
+        /* ===== C library =====
+         *
+         * Phase 5.6 / audit Low/Hardening: srand() removed because an
+         * .m1app calling it would re-seed the firmware-shared rand()
+         * state and silently weaken any other code path that relies on
+         * it. Apps that need randomness should call game_rand_seed /
+         * game_rand_range (already exposed under "Input"). */
         { "memset",    (void *)memset },
         { "memcpy",    (void *)memcpy },
         { "memcmp",    (void *)memcmp },
@@ -442,7 +489,6 @@ void m1_app_api_init(void)
         { "atoi",      (void *)atoi },
         { "strtol",    (void *)strtol },
         { "rand",      (void *)rand },
-        { "srand",     (void *)srand },
         { "abs",       (void *)abs },
     };
 

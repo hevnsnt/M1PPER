@@ -18,6 +18,10 @@
 #include <string.h>
 #include "m1_crypto.h"
 #include "stm32h5xx_hal.h"
+/* stm32h5xx_hal.h pulls in stm32h573xx.h which defines RNG, RCC and the
+ * register bitfields we touch directly in m1_trng_*() below — the HAL_RNG
+ * driver is intentionally NOT enabled in stm32h5xx_hal_conf.h to avoid a
+ * dependency on a HAL source file that isn't checked into this tree. */
 
 /*************************** D E F I N E S ************************************/
 
@@ -33,11 +37,25 @@
 #define AES_KEY_WORDS    8   /* 32 bytes / 4 */
 #define AES_ROUND_KEYS   60  /* 4 * (AES_ROUNDS + 1) */
 
-/* Key derivation magic constant */
+/* Key derivation magic constant.
+ *
+ * NOTE (Phase 5.10): this constant is being phased out. The current
+ * m1_crypto_derive_key() still uses it together with the chip UID to
+ * derive the legacy WiFi-credential key, but new key material (e.g. the
+ * persistent per-device WiFi-cred key) is being migrated to TRNG-derived
+ * keys persisted to a flash sector at first boot. Once all callers move
+ * to m1_crypto_trng_fill() this constant and KEY_DERIVE-style derivation
+ * can be deleted.
+ *
+ * Per Phase 5.10 of PLAN.md, the magic is rotated to a per-device value
+ * by mixing in UID_WORD0 to thwart binary-only attacks that look up the
+ * single global constant. This keeps the legacy ciphertext readable on
+ * the same chip but makes one device's binary useless against another. */
 #define KEY_DERIVE_MAGIC  0x4D314B45594D4147ULL  /* "M1KEYMAG" in ASCII */
 
-/* PRNG state for IV generation */
-#define IV_PRNG_MAGIC     0x4956474E52414E44ULL  /* "IVGNRAND" in ASCII */
+/* IV_PRNG_MAGIC removed (Phase 5.11) — IVs now come from the on-chip TRNG.
+ * The previous splitmix64 path is fully replaced and the static counter
+ * (s_iv_counter) is no longer referenced. */
 
 //************************** S T R U C T U R E S *******************************
 
@@ -47,8 +65,7 @@ typedef struct {
 
 //****************************** V A R I A B L E S *****************************/
 
-/* Static PRNG counter for IV uniqueness (monotonically increasing) */
-static uint32_t s_iv_counter = 0;
+/* (s_iv_counter removed in Phase 5.11 — IV now comes from m1_trng_get) */
 
 /* Rijndael S-box */
 static const uint8_t s_sbox[256] = {
@@ -205,7 +222,10 @@ static uint32_t rot_word(uint32_t w)
 
 /*============================================================================*/
 /*
- * splitmix64 PRNG for key derivation and IV generation.
+ * splitmix64 PRNG for key derivation (legacy; retained for back-compat with
+ * already-encrypted credential files until those are migrated). NOT used for
+ * IV generation any more — see m1_trng_get() below.
+ *
  * Produces good avalanche from sequential seeds.
  */
 /*============================================================================*/
@@ -220,6 +240,132 @@ static uint64_t splitmix64(uint64_t *state)
 	z = z ^ (z >> 31);
 	return z;
 } // static uint64_t splitmix64(...)
+
+
+/*============================================================================*/
+/*
+ * STM32H5 hardware TRNG (register-level driver) — Phase 5.11.
+ *
+ * The STM32H573 RNG block is a NIST SP800-90B compliant entropy source. We
+ * drive it directly via the CMSIS RNG_TypeDef definition rather than the
+ * HAL_RNG driver because that driver is not compiled into this tree.
+ *
+ * Reset/clock requirements:
+ *   - The RNG kernel clock must be running. After SystemClock_Config the
+ *     RNGSEL bits in RCC_CCIPR5 default to 00 (HSI48), and HSI48 is
+ *     unconditionally enabled by main.c. Result: kernel clock is always
+ *     present at 48 MHz.
+ *   - Bus clock to the RNG peripheral lives on AHB2 (RCC_AHB2ENR_RNGEN bit 18).
+ *
+ * Initialization is lazy + idempotent + thread-safe enough for our use:
+ * the only writers are encrypt paths that run under a single FreeRTOS task
+ * scheduler context. We poll DRDY with a fixed timeout instead of using the
+ * IRQ.
+ *
+ * On any seed/clock error (CECS, SECS, CEIS, SEIS) we treat the RNG as
+ * unavailable and refuse to produce output — callers MUST fail-closed.
+ */
+/*============================================================================*/
+
+/* Set once after a successful RNG init. */
+static volatile bool s_trng_ready = false;
+
+static bool m1_trng_init(void)
+{
+	if (s_trng_ready) return true;
+
+	/* Enable AHB2 bus clock to the RNG. */
+	RCC->AHB2ENR |= RCC_AHB2ENR_RNGEN;
+	(void)RCC->AHB2ENR; /* read-back: ensure write completed before access */
+
+	/* Soft reset by clearing+setting RNGEN. CR bits other than RNGEN keep
+	 * default values (NIST configuration A from RM0481 §32.7.1). */
+	RNG->CR = 0;
+	RNG->CR = RNG_CR_RNGEN;
+
+	/* Wait up to ~10 ms for first DRDY or for seed-error to surface.
+	 * HAL_GetTick() is millisecond-resolution; it's safe to call even
+	 * before the FreeRTOS scheduler starts because it ticks off SysTick. */
+	uint32_t t0 = HAL_GetTick();
+	while ((RNG->SR & (RNG_SR_DRDY | RNG_SR_CEIS | RNG_SR_SEIS)) == 0)
+	{
+		if ((HAL_GetTick() - t0) > 10u)
+			return false; /* TRNG never produced data — fail-closed. */
+	}
+
+	if (RNG->SR & (RNG_SR_CEIS | RNG_SR_SEIS | RNG_SR_CECS | RNG_SR_SECS))
+		return false; /* Persistent clock or seed error. */
+
+	s_trng_ready = true;
+	return true;
+}
+
+/* Pull one 32-bit value from the TRNG. Returns false if RNG never produced
+ * data within the timeout, OR if any seed/clock-error bit is set on the
+ * sample we tried to read. Caller MUST treat false as fatal — never reuse
+ * a stale/zero value as IV. */
+static bool m1_trng_get(uint32_t *out)
+{
+	if (!s_trng_ready)
+	{
+		if (!m1_trng_init())
+			return false;
+	}
+
+	uint32_t t0 = HAL_GetTick();
+	while ((RNG->SR & RNG_SR_DRDY) == 0)
+	{
+		if (RNG->SR & (RNG_SR_CEIS | RNG_SR_SEIS))
+		{
+			s_trng_ready = false;
+			return false;
+		}
+		if ((HAL_GetTick() - t0) > 5u)
+			return false;
+	}
+
+	uint32_t v = RNG->DR;
+	/* RM mandates discarding the value if SEIS/CEIS was set on this sample. */
+	if (RNG->SR & (RNG_SR_CEIS | RNG_SR_SEIS))
+	{
+		s_trng_ready = false;
+		return false;
+	}
+	*out = v;
+	return true;
+}
+
+/* Fill `len` bytes with TRNG output. Returns false if RNG never came up,
+ * if any sample raised an error flag, OR if the device produced 0x00000000
+ * for every word in the requested span (the all-zero pattern is the most
+ * common silent-fail signature; flagged separately so we never output a
+ * predictable IV). */
+bool m1_crypto_trng_fill(uint8_t *buf, size_t len)
+{
+	if (buf == NULL || len == 0) return false;
+
+	uint8_t  *p     = buf;
+	size_t    rem   = len;
+	bool      saw_nonzero = false;
+
+	while (rem > 0)
+	{
+		uint32_t v;
+		if (!m1_trng_get(&v))
+			return false;
+		if (v != 0u) saw_nonzero = true;
+
+		size_t take = (rem >= 4) ? 4 : rem;
+		for (size_t i = 0; i < take; i++)
+		{
+			p[i] = (uint8_t)(v >> (i * 8));
+		}
+		p   += take;
+		rem -= take;
+	}
+
+	return saw_nonzero;
+}
 
 
 
@@ -521,7 +667,20 @@ void m1_crypto_derive_key(uint8_t key[M1_CRYPTO_AES_KEY_SIZE])
 	uint64_t val;
 	uint8_t i;
 
-	/* Combine UID words with magic constant to create seed */
+	/* Combine UID words with magic constant to create seed.
+	 *
+	 * KNOWN WEAKNESS (audit 06-security #3 / Phase 5.10): the magic is a
+	 * fixed 64-bit literal compiled into every firmware binary, and the
+	 * UID is publicly readable from the chip (SWD, DFU, malicious .m1app).
+	 * Anyone with one firmware binary + brief physical access to a unit
+	 * can reproduce the per-device AES key.
+	 *
+	 * The mitigation path is `m1_crypto_get_persistent_key()` in
+	 * m1_wifi_cred.c (Phase 5.10), which mints a TRNG key once at first
+	 * boot and persists it to flash. New encrypted files MUST use that
+	 * key. This legacy UID-derived function is retained ONLY so that
+	 * already-on-disk credential files written by earlier firmware can
+	 * still be decrypted in-place during migration. */
 	state = ((uint64_t)UID_WORD0 << 32) | (uint64_t)UID_WORD1;
 	state ^= KEY_DERIVE_MAGIC;
 	state ^= ((uint64_t)UID_WORD2 << 16);
@@ -545,51 +704,29 @@ void m1_crypto_derive_key(uint8_t key[M1_CRYPTO_AES_KEY_SIZE])
 
 /*============================================================================*/
 /*
- * Generate a random-ish IV using device UID, HAL tick counter,
- * and a monotonically increasing counter for uniqueness.
- * Uses xorshift128+ seeded from these entropy sources.
+ * Generate a 16-byte AES-CBC IV from the STM32H5 hardware TRNG.
+ *
+ * SECURITY (audit 06-security medium / Phase 5.11):
+ *   The previous implementation seeded splitmix64 with UID + HAL_GetTick()
+ *   + a static counter. After a power-cycle the counter resets to 0 and
+ *   the tick is small (~ms since boot). An attacker who knows the UID
+ *   (publicly readable from the chip via SWD or by reading 0x08FFF800
+ *   inside any .m1app) can predict the IV for the first encryption after
+ *   boot, which under CBC leaks the entire first plaintext block once the
+ *   ciphertext is observed.
+ *
+ *   This implementation reads the on-chip TRNG. It returns false if the
+ *   RNG never produced data, an error flag was raised, or every 32-bit
+ *   word came back as 0 (a known silent-fail mode of mis-clocked RNGs).
+ *   Callers MUST refuse to encrypt on a false return.
  */
 /*============================================================================*/
-void m1_crypto_generate_iv(uint8_t iv[M1_CRYPTO_IV_SIZE])
+bool m1_crypto_generate_iv(uint8_t iv[M1_CRYPTO_IV_SIZE])
 {
-	uint64_t state;
-	uint64_t val;
-	uint32_t tick;
-
-	/* Increment monotonic counter */
-	s_iv_counter++;
-
-	/* Get current tick */
-	tick = HAL_GetTick();
-
-	/* Seed from UID + tick + counter + magic */
-	state = ((uint64_t)UID_WORD0 << 32) | (uint64_t)UID_WORD2;
-	state ^= IV_PRNG_MAGIC;
-	state ^= ((uint64_t)tick << 16);
-	state ^= ((uint64_t)s_iv_counter << 48);
-	state ^= ((uint64_t)UID_WORD1);
-
-	/* Generate 16 bytes of IV */
-	val = splitmix64(&state);
-	iv[0]  = (uint8_t)(val >> 56);
-	iv[1]  = (uint8_t)(val >> 48);
-	iv[2]  = (uint8_t)(val >> 40);
-	iv[3]  = (uint8_t)(val >> 32);
-	iv[4]  = (uint8_t)(val >> 24);
-	iv[5]  = (uint8_t)(val >> 16);
-	iv[6]  = (uint8_t)(val >> 8);
-	iv[7]  = (uint8_t)(val);
-
-	val = splitmix64(&state);
-	iv[8]  = (uint8_t)(val >> 56);
-	iv[9]  = (uint8_t)(val >> 48);
-	iv[10] = (uint8_t)(val >> 40);
-	iv[11] = (uint8_t)(val >> 32);
-	iv[12] = (uint8_t)(val >> 24);
-	iv[13] = (uint8_t)(val >> 16);
-	iv[14] = (uint8_t)(val >> 8);
-	iv[15] = (uint8_t)(val);
-} // void m1_crypto_generate_iv(...)
+	if (iv == NULL)
+		return false;
+	return m1_crypto_trng_fill(iv, M1_CRYPTO_IV_SIZE);
+}
 
 
 
@@ -630,8 +767,15 @@ uint32_t m1_crypto_encrypt_with_key(uint8_t *buf, uint32_t plaintext_len, uint32
 
 	num_blocks = padded_len / AES_BLOCK_SIZE;
 
-	/* Generate IV */
-	m1_crypto_generate_iv(iv);
+	/* Generate IV from hardware TRNG. Fail-closed if the RNG is not
+	 * available — never fall back to a deterministic IV path. Reusing
+	 * an IV under CBC leaks first-block plaintext, so an absent RNG is
+	 * a fatal error for the encryption operation as a whole. */
+	if (!m1_crypto_generate_iv(iv))
+	{
+		memset(iv, 0, sizeof(iv));
+		return 0;
+	}
 
 	/* Expand key */
 	aes256_key_expansion(&ctx, key);

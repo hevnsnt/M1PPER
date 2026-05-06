@@ -23,8 +23,21 @@
 /* Derive a device-specific encryption key from STM32H5 96-bit UID */
 void m1_crypto_derive_key(uint8_t key[M1_CRYPTO_AES_KEY_SIZE]);
 
-/* Generate a random IV using device UID + tick counter */
-void m1_crypto_generate_iv(uint8_t iv[M1_CRYPTO_IV_SIZE]);
+/* Generate a random IV from the STM32H5 hardware TRNG. Returns true on
+ * success, false if the TRNG is unavailable / produced bad output. Callers
+ * MUST refuse to encrypt if this returns false (audit 06-security medium /
+ * Phase 5.11). The previous splitmix64+UID+tick path is gone; an attacker
+ * who could power-cycle the device after a known boot duration could
+ * predict the IV and recover first-block plaintext under CBC. */
+bool m1_crypto_generate_iv(uint8_t iv[M1_CRYPTO_IV_SIZE]);
+
+/* Bulk TRNG fill — fills `len` bytes with cryptographic-grade randomness
+ * from the STM32H5 RNG block. Returns false if any sample errored out or
+ * if every 32-bit word came back zero (a known silent-fail signature).
+ * Used by the WiFi credential key bootstrap to mint a per-device key
+ * once at first boot (Phase 5.10). */
+#include <stddef.h>
+bool m1_crypto_trng_fill(uint8_t *buf, size_t len);
 
 /* Encrypt data in-place with AES-256-CBC + PKCS7 padding
  * Input: plaintext in buf, plaintext_len bytes

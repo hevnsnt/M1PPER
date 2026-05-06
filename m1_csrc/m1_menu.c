@@ -42,6 +42,7 @@
 #include "m1_branding.h"
 #include "m1_main_menu.h"
 #include "m1_field_detect.h"
+#include "m1_tasks.h"
 
 /*************************** D E F I N E S ************************************/
 
@@ -1093,6 +1094,27 @@ static void menu_main_init(void)
  * This function handles all tasks of the M1 main menu.
 */
 /*============================================================================*/
+/* Run-once worker that performs ESP32 SPI handshake + AT init in parallel
+ * with the main menu task.  audit 07 m1_main_menu.c:1106-1111 — the prior
+ * code called m1_esp32_init + esp32_main_init synchronously on the menu
+ * task entry, blocking the main menu render for ~2-5 s with no UI feedback.
+ *
+ * Every WiFi/BLE feature already lazy-inits the ESP32 on its own entry
+ * (see e.g. app_ble_spam.c:546) so worst-case correctness is unchanged.
+ * This task just front-loads the cost when m1_esp32_auto_init is set, so
+ * the user doesn't pay it on first menu navigation into a wireless
+ * feature.  Prototypes for m1_esp32_init / esp32_main_init come from
+ * m1_esp32_hal.h and esp_app_main.h above. */
+static void m1_esp32_async_boot_task(void *param)
+{
+    (void)param;
+    if (!m1_esp32_get_init_status())
+        m1_esp32_init();
+    if (!get_esp32_main_init_status())
+        esp32_main_init();
+    vTaskDelete(NULL);
+}
+
 void menu_main_handler_task(void *param)
 {
 	uint8_t key, sel_item, n_items;
@@ -1105,10 +1127,16 @@ void menu_main_handler_task(void *param)
 
 	if (m1_esp32_auto_init)
 	{
-		if (!m1_esp32_get_init_status())
-			m1_esp32_init();
-		if (!get_esp32_main_init_status())
-			esp32_main_init();
+		/* Spawn a low-priority worker so the menu is interactive within ~50 ms
+		 * of boot.  Stack 1024 32-bit words covers the SPI handshake retries
+		 * and AT command handshake.  If creation fails (heap pressure) fall
+		 * back to the lazy-init path on first wireless feature entry. */
+		(void)xTaskCreate(m1_esp32_async_boot_task,
+		                  "m1_esp32_async_boot",
+		                  M1_TASK_STACK_SIZE_1024,
+		                  NULL,
+		                  TASK_PRIORITY_RUNONCE_TASK_HANDLER,
+		                  NULL);
 	}
 
 	menu_main_init();
