@@ -464,6 +464,10 @@ static void run_spam_mode(uint8_t mode_idx)
     if (!spam_ble_init()) return;
 
     while (1) {
+        /* Detect ESP32 reboot mid-spam and rebuild advertising state. */
+        if (esp_consume_slave_restart_event()) {
+            spam_ble_init();
+        }
         const spam_pkt_t *pkt = all ? all_pkts_ptr(pidx) : &m->pkts[pidx];
         if (!pkt) { pidx = 0; continue; }
 

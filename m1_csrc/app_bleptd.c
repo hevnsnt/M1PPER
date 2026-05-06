@@ -619,6 +619,13 @@ static bool parse_blescan_line(char *line, char addr[18], int8_t *rssi,
 
 static void scan_pass(uint16_t seconds)
 {
+    /* If the slave rebooted between scans, the on-chip NimBLE
+     * stack is back to BLEINIT=0 and adv config is gone. We need
+     * to re-issue the init sequence before scanning. */
+    if (esp_consume_slave_restart_event()) {
+        at_send("AT+BLEINIT=0\r\n");
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
     at_send("AT+BLEINIT=1\r\n");
     vTaskDelay(pdMS_TO_TICKS(50));
     at_send("AT+BLESCANPARAM=0,0,0,80,40\r\n");
