@@ -24,7 +24,11 @@
 
 uint8_t subghz_decode_keeloq(uint16_t p, uint16_t pulsecount)
 {
-    uint64_t code = 0;
+    /* KeeLoq packets are 66 bits, which does not fit in a single uint64.
+     * Track the low 64 bits ("low") and the trailing 2 status bits ("high")
+     * separately so the upper bits do not get silently shifted off. */
+    uint64_t low  = 0;
+    uint8_t  high = 0;          /* holds bit64..bit65, max value 0x03 */
     uint16_t te_short, te_long, tol_s, tol_l;
     uint16_t i;
     uint8_t bits_count = 0;
@@ -45,35 +49,59 @@ uint8_t subghz_decode_keeloq(uint16_t p, uint16_t pulsecount)
         uint16_t t_hi = subghz_decenc_ctl.pulse_times[i];
         uint16_t t_lo = subghz_decenc_ctl.pulse_times[i + 1];
 
-        code <<= 1;
-
+        uint8_t this_bit;
         if (get_diff(t_hi, te_short) < tol_s && get_diff(t_lo, te_long) < tol_l)
         {
-            /* bit 0 */
+            this_bit = 0;
         }
         else if (get_diff(t_hi, te_long) < tol_l && get_diff(t_lo, te_short) < tol_s)
         {
-            code |= 1;
+            this_bit = 1;
         }
         else
         {
             break;
         }
+
+        /* Shift the (high, low) pair left by one and OR in the new bit at
+         * the bottom.  The bit shifted out of the low half goes into the
+         * low bit of high. */
+        uint8_t carry = (uint8_t)((low >> 63) & 1U);
+        low  = (low << 1) | (uint64_t)this_bit;
+        high = (uint8_t)(((high << 1) | carry) & 0x03U);
+
         bits_count++;
     }
 
     if (bits_count >= max_bits)
     {
-        subghz_decenc_ctl.n64_decodedvalue = code;
-        subghz_decenc_ctl.ndecodedbitlength = bits_count;
-        subghz_decenc_ctl.ndecodeddelay = 0;
-        subghz_decenc_ctl.ndecodedprotocol = p;
+        /* Bit layout (transmitted MSB first into our (high,low) buffer):
+         *   bits 0..1   (top of high) = status (2 bits)
+         *   bits 2..5                 = button id (4 bits)
+         *   bits 6..33                = serial (28 bits)
+         *   bits 34..65               = encrypted rolling code (32 bits)
+         *
+         * After 66 shifts:
+         *   high[1:0]            -> the top 2 bits  (status, top-most)
+         *   low[63:62]           -> next 2 bits
+         *   ...
+         *   low[31:0]            -> rolling code (least significant 32)
+         */
+        uint64_t serial64    = (low >> 32) & 0x0FFFFFFFULL;        /* 28 bits */
+        uint64_t button64    = (low >> 60) & 0x0FULL;              /* 4 bits  */
+        uint8_t  status_bits = high & 0x03U;                       /* 2 bits  */
 
-        /* Extract serial (bits 34-61 of the 66-bit packet = upper 28 bits after encrypted) */
-        subghz_decenc_ctl.n32_serialnumber = (uint32_t)((code >> 2) & 0x0FFFFFFF);
-        subghz_decenc_ctl.n8_buttonid = (uint8_t)((code >> 30) & 0x0F);
-        /* The lower 32 bits are the encrypted rolling code */
-        subghz_decenc_ctl.n32_rollingcode = (uint32_t)(code & 0xFFFFFFFF);
+        subghz_decenc_ctl.n64_decodedvalue   = low;
+        subghz_decenc_ctl.ndecodedbitlength  = bits_count;
+        subghz_decenc_ctl.ndecodeddelay      = 0;
+        subghz_decenc_ctl.ndecodedprotocol   = p;
+        subghz_decenc_ctl.n32_rollingcode    = (uint32_t)(low & 0xFFFFFFFFUL);
+        subghz_decenc_ctl.n32_serialnumber   = (uint32_t)serial64;
+        /* Pack button (low 4 bits) + status (next 2) into the buttonid byte
+         * so the existing UI display still shows something useful without
+         * extending the decoder struct. */
+        subghz_decenc_ctl.n8_buttonid        =
+            (uint8_t)(button64 | ((uint8_t)status_bits << 4));
 
         return 0;
     }

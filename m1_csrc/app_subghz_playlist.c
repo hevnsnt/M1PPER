@@ -156,15 +156,29 @@ void subghz_playlist_run(void)
         const char *fn = strrchr(s_paths[i], '/');
         fn = fn ? fn + 1 : s_paths[i];
 
-        draw_status("Playing...", fn, i + 1, s_count);
-
-        /* Determine file type and transmit */
+        /* Determine file type and transmit.  sub_ghz_replay_flipper_file()
+         * is a Flipper-format parser only — handing it an .sgh native dump
+         * silently fails (the parser bails out on the missing "Filetype:"
+         * line and returns without TX'ing anything).  Branch explicitly so
+         * the user sees a clear status instead of "playing" nothing. */
         uint16_t plen = (uint16_t)strlen(s_paths[i]);
         bool is_sub = (plen > 4 && strncasecmp(&s_paths[i][plen - 4], ".sub", 4) == 0);
+        bool is_sgh = (plen > 4 && strncasecmp(&s_paths[i][plen - 4], ".sgh", 4) == 0);
 
-        /* sub_ghz_replay_flipper_file() handles both .sub and falls back gracefully for .sgh */
-        (void)is_sub;
-        sub_ghz_replay_flipper_file(s_paths[i]);
+        if (is_sub) {
+            draw_status("Playing .sub", fn, i + 1, s_count);
+            sub_ghz_replay_flipper_file(s_paths[i]);
+        } else if (is_sgh) {
+            /* Native .sgh playback from the playlist context is not yet
+             * wired up: the existing loader assumes the m1_file_browser
+             * f_info global is populated from a directory walk.  Surface a
+             * status message instead of silently doing nothing. */
+            draw_status("Skipped .sgh", fn, i + 1, s_count);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        } else {
+            draw_status("Skipped (?)", fn, i + 1, s_count);
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
 
         /* Check for BACK between files */
         bool aborted = false;

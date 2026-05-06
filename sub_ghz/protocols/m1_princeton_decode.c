@@ -55,10 +55,58 @@ uint8_t subghz_decode_princeton(uint16_t p, uint16_t pulsecount)
 
     tolerance = subghz_protocols_list[p].te_tolerance;
     max_bits = subghz_protocols_list[p].data_bits;
-    //te_short = subghz_protocols_list[p].te_short;
-    //te_long = subghz_protocols_list[p].te_long;
-    te_short = subghz_decenc_ctl.pulse_times[2];
-    te_long = subghz_decenc_ctl.pulse_times[3];
+
+    /* Classify te_short / te_long by clustering all captured pulse widths
+     * into two bins.  The previous implementation took te_short = pulse_times[2]
+     * and te_long = pulse_times[3] which means a single noise pulse near the
+     * front of the packet poisoned the comparisons for every subsequent bit.
+     *
+     * Pass 1: find the median pulse width.  Anything notably smaller than the
+     *         median is a "short" bin candidate, anything larger is "long".
+     * Pass 2: average each bin to get robust te_short / te_long. */
+    if (pulsecount < 4U)
+        return 1;
+
+    /* Quick median via partial selection on a stack scratch copy.  We cap
+     * the number of widths we look at to keep this O(n^2) for sane n; sub-GHz
+     * frames typically have <= 200 pulses. */
+    uint16_t sample_n = pulsecount;
+    if (sample_n > 64U) sample_n = 64U;
+
+    uint16_t scratch[64];
+    for (i = 0; i < sample_n; i++)
+        scratch[i] = subghz_decenc_ctl.pulse_times[i];
+
+    /* Tiny insertion sort — n <= 64 so this is well under 4 KB of compares. */
+    for (uint16_t a = 1; a < sample_n; a++)
+    {
+        uint16_t key = scratch[a];
+        int16_t  b   = (int16_t)a - 1;
+        while (b >= 0 && scratch[b] > key)
+        {
+            scratch[b + 1] = scratch[b];
+            b--;
+        }
+        scratch[b + 1] = key;
+    }
+    uint16_t median = scratch[sample_n / 2U];
+
+    /* Bin pass: lower bin = below median, upper bin = above median.  Use
+     * sums so we can derive a robust mean without divisions per element. */
+    uint32_t lo_sum = 0, hi_sum = 0;
+    uint16_t lo_n = 0, hi_n = 0;
+    for (i = 0; i < sample_n; i++)
+    {
+        uint16_t w = scratch[i];
+        if (w == 0U) continue;
+        if (w <= median) { lo_sum += w; lo_n++; }
+        else             { hi_sum += w; hi_n++; }
+    }
+    if (lo_n == 0U || hi_n == 0U) return 1;
+    te_short = (uint16_t)(lo_sum / lo_n);
+    te_long  = (uint16_t)(hi_sum / hi_n);
+    if (te_short == 0U) te_short = 1U;
+
     if ( te_long < te_short )
     {
     	tolerance_long = te_short;

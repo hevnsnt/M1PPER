@@ -106,6 +106,10 @@ static uint32_t s_scale_us_per_px = RF_VIZ_DEFAULT_SCALE_US;
 static int32_t  s_scroll_pulse_idx = 0;        /* leftmost pulse on screen   */
 static bool     s_have_burst = false;          /* true once a burst sealed   */
 static const char *s_mod_hint = "";            /* PWM/Manchester guess       */
+/* Polarity of the GPIO0 line at the moment the capture pipeline was armed.
+ * The hardware ISR records EDGE durations only, so without sampling the
+ * starting level here, half the captures display upside-down. */
+static uint8_t  s_initial_level = 0;
 
 /* ============================================================================
  * Frequency entry helpers
@@ -392,13 +396,27 @@ static void rf_viz_capture_reset(void)
     s_scroll_pulse_idx = 0;
     s_have_burst = false;
     s_mod_hint = "";
+    /* Re-sample the current GPIO0 line level so a clear-buffer keypress
+     * before any RF arrives still labels bars with the correct polarity. */
+    s_initial_level = (uint8_t)(
+        (SUBGHZ_RX_GPIO_PORT->IDR & SUBGHZ_RX_GPIO_PIN) ? 1U : 0U);
     m1_ringbuffer_reset(&subghz_rx_rawdata_rb);
 }
 
-/* Pulse polarity convention: index 0 = LOW, index 1 = HIGH, etc. */
+/* Pulse polarity convention: index 0 takes the GPIO0 level captured at
+ * arm time; subsequent indices alternate.  Without seeding from the actual
+ * line level the visualiser inverts the displayed waveform on roughly half
+ * of all captures (whichever polarity the line happened to be on at arm).
+ *
+ * Truth table:
+ *   initial=HIGH(1): idx=0 HIGH, idx=1 LOW, idx=2 HIGH, ...
+ *   initial=LOW (0): idx=0 LOW,  idx=1 HIGH, idx=2 LOW, ...
+ *
+ * Both collapse to: is_high <=> (idx & 1) XOR initial != 0.
+ */
 static inline bool rf_viz_pulse_is_high(uint32_t idx)
 {
-    return (idx & 1U) == 1U;
+    return (((idx & 1U) ^ (uint32_t)s_initial_level) != 0U);
 }
 
 /* Returns true if at least one new pulse was appended. */
@@ -609,6 +627,13 @@ static void rf_viz_radio_start(uint32_t freq_hz)
                        (uint16_t)RF_VIZ_RING_SLOTS,
                        (uint8_t)sizeof(uint16_t));
     m1_ringbuffer_reset(&subghz_rx_rawdata_rb);
+
+    /* Sample the GPIO0 level at arm time.  Pulses come in alternating, so
+     * if the line was already HIGH when we armed, index 0 is a HIGH run; if
+     * it was LOW, index 0 is a LOW run.  rf_viz_pulse_is_high() uses this
+     * to label the bars correctly. */
+    s_initial_level = (uint8_t)(
+        (SUBGHZ_RX_GPIO_PORT->IDR & SUBGHZ_RX_GPIO_PIN) ? 1U : 0U);
 
     sub_ghz_pulse_capture_arm();
 }

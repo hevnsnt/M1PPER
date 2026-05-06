@@ -56,7 +56,13 @@
 #define POCSAG_IDLE_WORD            0x7A89C197UL
 #define POCSAG_BATCH_CODEWORDS      16        /* 8 frames * 2 codewords */
 
-#define POCSAG_SYNC_TOLERANCE_BITS  2         /* allow up to 2 bit errors */
+/* Sync-word match tolerance.  The original 2-bit window matched roughly
+ * 1024 random 32-bit patterns out of 2^32, so any noise burst could fake a
+ * batch start.  Tighten to 0-1 bits and additionally require a real POCSAG
+ * preamble (>= 32 alternating bits, the 1010... reversal pattern) to enter
+ * HUNT_SYNC. */
+#define POCSAG_SYNC_TOLERANCE_BITS  1
+#define POCSAG_PREAMBLE_MIN_BITS    32U
 
 /* BCH(31,21) generator polynomial: x^10 + x^9 + x^8 + x^6 + x^5 + x^3 + 1 */
 #define POCSAG_BCH_POLY             0x769U
@@ -124,6 +130,20 @@ typedef struct {
 
     uint32_t shift_reg;
     uint8_t  shift_filled;
+
+    /* Preamble lock state: count of consecutive alternating-bit transitions.
+     * Real POCSAG begins with a long 1010... preamble (576 bits at 512 baud).
+     * Without this gate, any noise pattern that approximately matches the
+     * sync word triggers a false batch decode. */
+    uint16_t preamble_run;
+    uint8_t  preamble_last_bit;
+
+    /* Pulse-quantiser state — must persist across pocsag_consume_pulses()
+     * calls because the ring buffer drains in chunks.  Previously these
+     * lived as function-scope statics and survived across re-entries to
+     * POCSAG, scrambling the first batch after a frequency change. */
+    uint8_t  cur_level;
+    uint16_t residual_us;
 
     /* In-progress alphanumeric message accumulator. */
     char     pending_text[POCSAG_MSG_TEXT_LEN + 1];
@@ -580,13 +600,39 @@ static void pocsag_handle_codeword(uint32_t cw)
 
 static void pocsag_feed_bit(uint8_t bit)
 {
-    pocsag_ctx.shift_reg = (pocsag_ctx.shift_reg << 1) | (bit & 1U);
+    bit &= 1U;
+
+    /* Track alternating-bit run length for preamble detection.  Each new
+     * bit either continues the alternation (preamble_run++) or resets it. */
+    if (bit != pocsag_ctx.preamble_last_bit)
+    {
+        if (pocsag_ctx.preamble_run < 0xFFFFU)
+            pocsag_ctx.preamble_run++;
+    }
+    else
+    {
+        pocsag_ctx.preamble_run = 0;
+    }
+    pocsag_ctx.preamble_last_bit = bit;
+
+    pocsag_ctx.shift_reg = (pocsag_ctx.shift_reg << 1) | bit;
     if (pocsag_ctx.shift_filled < 32)
         pocsag_ctx.shift_filled++;
 
     switch (pocsag_ctx.state)
     {
         case POCSAG_STATE_HUNT_PREAMBLE:
+        {
+            /* Need at least POCSAG_PREAMBLE_MIN_BITS of 1010... alternation
+             * before we will even consider a sync match. */
+            if (pocsag_ctx.preamble_run >= POCSAG_PREAMBLE_MIN_BITS)
+            {
+                pocsag_ctx.state = POCSAG_STATE_HUNT_SYNC;
+                /* fall through to sync test on the next bit */
+            }
+            break;
+        }
+
         case POCSAG_STATE_HUNT_SYNC:
         {
             if (pocsag_ctx.shift_filled < 32) break;
@@ -646,10 +692,14 @@ static void pocsag_feed_bit(uint8_t bit)
                 if (pocsag_ctx.frame_idx >= 8)
                 {
                     /* End of batch: next 32 bits should be the next sync
-                     * word. Drop back to hunt mode. */
+                     * word, with an inter-batch preamble in real traffic.
+                     * Drop back to HUNT_PREAMBLE so we re-arm on a fresh
+                     * 1010... run rather than blindly accepting the next
+                     * sync-shaped 32-bit window. */
                     pocsag_finalize_pending();
-                    pocsag_ctx.state = POCSAG_STATE_HUNT_SYNC;
+                    pocsag_ctx.state = POCSAG_STATE_HUNT_PREAMBLE;
                     pocsag_ctx.frame_idx = 0;
+                    pocsag_ctx.preamble_run = 0;
                 }
             }
             break;
@@ -661,12 +711,14 @@ static void pocsag_consume_pulses(uint16_t *samples, uint16_t count, uint8_t rat
 {
     /* OOK pulses alternate level: assume the first sample after RX init
      * is a "low" run (no carrier). The actual polarity is recovered by
-     * the inverted-sync-word fallback inside pocsag_feed_bit. */
+     * the inverted-sync-word fallback inside pocsag_feed_bit.
+     *
+     * cur_level + residual_us live on the context (not function statics) so
+     * pocsag_reset_state() can zero them on every fresh entry into the
+     * decoder.  Otherwise leftover state from a previous POCSAG run scrambles
+     * the first batch on re-entry. */
     uint16_t bit_us = pocsag_rates[rate_idx].bit_us;
     uint16_t half_us = pocsag_rates[rate_idx].half_bit_us;
-
-    static uint8_t  cur_level = 0;
-    static uint16_t residual_us = 0;
 
     for (uint16_t i = 0; i < count; i++)
     {
@@ -674,16 +726,16 @@ static void pocsag_consume_pulses(uint16_t *samples, uint16_t count, uint8_t rat
         if (dur == 0) dur = 1;
 
         /* Add residual from previous pulse to better track sub-bit drift. */
-        dur += residual_us;
-        residual_us = 0;
+        dur += pocsag_ctx.residual_us;
+        pocsag_ctx.residual_us = 0;
 
         /* Number of bits represented by this pulse. */
         uint32_t nbits = (dur + half_us) / bit_us;
         if (nbits == 0)
         {
             /* Dur shorter than half a bit: accumulate into residual. */
-            residual_us = (uint16_t)dur;
-            cur_level ^= 1U;
+            pocsag_ctx.residual_us = (uint16_t)dur;
+            pocsag_ctx.cur_level ^= 1U;
             continue;
         }
 
@@ -691,14 +743,14 @@ static void pocsag_consume_pulses(uint16_t *samples, uint16_t count, uint8_t rat
         if (nbits > 64) nbits = 64;
 
         for (uint32_t k = 0; k < nbits; k++)
-            pocsag_feed_bit(cur_level);
+            pocsag_feed_bit(pocsag_ctx.cur_level);
 
         /* Track residual error so timing drift does not accumulate. */
         uint32_t consumed = nbits * bit_us;
         if (dur > consumed)
-            residual_us = (uint16_t)(dur - consumed);
+            pocsag_ctx.residual_us = (uint16_t)(dur - consumed);
 
-        cur_level ^= 1U;
+        pocsag_ctx.cur_level ^= 1U;
     }
 }
 
@@ -711,7 +763,9 @@ static void pocsag_reset_state(uint8_t rate_idx)
 {
     memset(&pocsag_ctx, 0, sizeof(pocsag_ctx));
     pocsag_ctx.rate_idx = rate_idx;
-    pocsag_ctx.state = POCSAG_STATE_HUNT_SYNC;
+    /* Start in HUNT_PREAMBLE so a real 1010... run is required before any
+     * sync-word match is even considered. */
+    pocsag_ctx.state = POCSAG_STATE_HUNT_PREAMBLE;
 }
 
 /* ============================================================================
