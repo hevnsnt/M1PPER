@@ -4703,6 +4703,35 @@ static uint8_t sub_ghz_replay_continue(uint8_t ret_code_in)
 
 /*============================================================================*/
 /**
+  * @brief Returns 1 if a frequency (MHz) falls inside an unconditionally
+  *        restricted band, regardless of region setting.  Covers FCC 15.205
+  *        restricted ranges, aircraft VHF voice/AM, and the 162 MHz NOAA / US
+  *        public-safety neighbourhood that absolutely cannot be transmitted on
+  *        with off-the-shelf hardware.
+  *
+  * Bands rejected:
+  *   118.000-137.000   Aircraft VHF AM (worldwide)
+  *   138.000-144.000   US public safety / military
+  *   148.000-149.900   US public safety / military
+  *   162.400-162.550   NOAA weather (transmit illegal worldwide)
+  *   322.000-335.400   FCC 15.205 restricted
+  *   399.900-410.000   FCC 15.205 restricted
+  *   406.000-406.100   COSPAS-SARSAT (international)
+  */
+/*============================================================================*/
+static uint8_t sub_ghz_freq_is_globally_restricted(float freq_mhz)
+{
+	if (freq_mhz >= 118.000f && freq_mhz <= 137.000f) return 1;
+	if (freq_mhz >= 138.000f && freq_mhz <= 144.000f) return 1;
+	if (freq_mhz >= 148.000f && freq_mhz <= 149.900f) return 1;
+	if (freq_mhz >= 162.400f && freq_mhz <= 162.550f) return 1;
+	if (freq_mhz >= 322.000f && freq_mhz <= 335.400f) return 1;
+	if (freq_mhz >= 399.900f && freq_mhz <= 410.000f) return 1;
+	return 0;
+}
+
+/*============================================================================*/
+/**
   * @brief Check a frequency if it falls within the ranges of the FCC ISM list
   * @param
   * @retval 0 if no violation
@@ -4715,16 +4744,21 @@ static uint8_t sub_ghz_fcc_ism_band_check(uint8_t band, uint8_t channel)
 
 	ret = 1;
 
-	/* Region "Off" — no filtering, allow all frequencies */
-	if (subghz_regions_list[m1_device_stat.config.ism_band_region].bands_list == 0)
-		return 0;
-
 	if (band == SUB_GHZ_BAND_CUSTOM)
 		freq = (float)subghz_custom_freq_hz / 1000000.0f;
 	else if (band < SUB_GHZ_BAND_EOL)
 		freq = subghz_band_steps[band][0] + channel * CHANNEL_STEP;
 	else
 		return 1; /* unknown band — reject */
+
+	/* Globally-restricted bands (aircraft, FCC 15.205, NOAA, public safety):
+	 * NEVER transmit, regardless of "Off" region selection. */
+	if (sub_ghz_freq_is_globally_restricted(freq))
+		return 1;
+
+	/* Region "Off" — no positive-list filtering, allow non-restricted freqs */
+	if (subghz_regions_list[m1_device_stat.config.ism_band_region].bands_list == 0)
+		return 0;
 
 	for (i=0; i<subghz_regions_list[m1_device_stat.config.ism_band_region].bands_list; i++)
 	{
@@ -4888,8 +4922,13 @@ void sub_ghz_spectrum_analyzer(void)
 
     menu_sub_ghz_init();
 
-    /* Initialize radio */
-    if (center_freq < 525000000UL && center_freq >= 284000000UL)
+    /* Initialize radio.  Pick the closest base preset; SI446x_Set_Frequency
+     * handles the actual retune so this only needs to load AGC / RX BW that
+     * is sane for the band.  The 200 MHz preset must NOT use the 915 MHz
+     * config (wildly wrong AGC/RX-BW for low VHF). */
+    if (center_freq < 284000000UL)
+        radio_init_rx_tx(SUB_GHZ_BAND_315, MODEM_MOD_TYPE_OOK, true);
+    else if (center_freq < 525000000UL)
         radio_init_rx_tx(SUB_GHZ_BAND_433, MODEM_MOD_TYPE_OOK, true);
     else
         radio_init_rx_tx(SUB_GHZ_BAND_915, MODEM_MOD_TYPE_OOK, true);
@@ -4914,11 +4953,23 @@ void sub_ghz_spectrum_analyzer(void)
         peak_bar = 0;
         peak_freq_hz = freq;
 
+        /* Per-band dwell time after retune: low-VHF AGC is slower than
+         * 433/915 MHz because of the lower RX BW.  Numbers are tuned to
+         * keep the sweep responsive (~50 Hz per bar at high band) while
+         * giving the synth + AGC enough time to settle on low band. */
+        uint32_t dwell_ms;
+        if (center_freq < 284000000UL)
+            dwell_ms = 3U;        /* 142-258 MHz extended low band */
+        else if (center_freq < 525000000UL)
+            dwell_ms = 2U;        /* 300-525 MHz */
+        else
+            dwell_ms = 1U;        /* 850-1050 MHz */
+
         for (i = 0; i < SPECTRUM_BAR_COUNT; i++)
         {
             SI446x_Set_Frequency(freq);
             SI446x_Start_Rx(0);
-            HAL_Delay(1);  /* Let AGC settle */
+            HAL_Delay(dwell_ms);  /* Let synth + AGC settle */
 
             SI446x_Get_IntStatus(0, 0, 0);
             pmodemstat = SI446x_Get_ModemStatus(0x00);
@@ -5271,25 +5322,50 @@ void sub_ghz_brute_force(void)
     if (state == 1)
     {
         /* Init radio for TX on 433.92 MHz */
-        radio_init_rx_tx(SUB_GHZ_BAND_433_92, MODEM_MOD_TYPE_OOK, true);
-        SI446x_Select_Frontend(SUB_GHZ_BAND_433_92);
-        radio_set_antenna_mode(RADIO_ANTENNA_MODE_TX);
+        sub_ghz_set_opmode(SUB_GHZ_OPMODE_TX, SUB_GHZ_BAND_433_92, 0,
+                           tx_power_values[subghz_tx_power_idx]);
+        sub_ghz_tx_raw_init();
     }
 
     /* Brute force loop */
     while (running && state == 1)
     {
-        /* Encode and transmit current code */
+        /* Encode current code into the linear pulse buffer.  The buffer is
+         * uint16_t with bit0 holding the GPIO2 polarity (mark/space). */
         brute_force_encode_pwm(code, brute_bits[proto_idx],
                               te_short, te_long,
                               pulse_buf, &pulse_count);
 
-        /* Load into ring buffer for TX (reuse existing TX path) */
-        m1_ringbuffer_reset(&subghz_rx_rawdata_rb);
-        for (uint16_t i = 0; i < pulse_count; i++)
+        /* Drive TIM1/DMA off the encoded buffer.  This actually emits the
+         * RF pulses on GPIO2 — without this call the radio is in TX antenna
+         * mode but no symbol stream is ever transmitted. */
+        if (pulse_count > 0)
         {
-            uint32_t val32 = pulse_buf[i];
-            m1_ringbuffer_insert(&subghz_rx_rawdata_rb, (uint8_t *)&val32);
+            sub_ghz_transmit_raw((uint32_t)pulse_buf,
+                                 (uint32_t)&timerhdl_subghz_tx.Instance->ARR,
+                                 pulse_count, 0);
+
+            /* Wait up to ~250 ms for the TX-complete event so we don't trample
+             * the active DMA on the next iteration.  Block on the main queue
+             * to coexist with key handling below. */
+            TickType_t tx_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(250);
+            for (;;)
+            {
+                TickType_t now = xTaskGetTickCount();
+                if (now >= tx_deadline) break;
+                if (xQueueReceive(main_q_hdl, &q_item, tx_deadline - now) != pdTRUE)
+                    break;
+                if (q_item.q_evt_type == Q_EVENT_SUBGHZ_TX)
+                    break;
+                if (q_item.q_evt_type == Q_EVENT_KEYPAD)
+                {
+                    /* Defer the keypad event back to the queue so the
+                     * progress-update branch below can react. */
+                    xQueueSendToFront(main_q_hdl, &q_item, 0);
+                    break;
+                }
+            }
+            sub_ghz_raw_tx_stop();
         }
 
         /* Update display every 64 codes */
@@ -5358,8 +5434,9 @@ void sub_ghz_brute_force(void)
         }
     }
 
-    radio_set_antenna_mode(RADIO_ANTENNA_MODE_ISOLATED);
-    SI446x_Change_State(SI446X_CMD_CHANGE_STATE_ARG_NEXT_STATE1_NEW_STATE_ENUM_SLEEP);
+    sub_ghz_raw_tx_stop();
+    sub_ghz_tx_raw_deinit();
+    sub_ghz_set_opmode(SUB_GHZ_OPMODE_ISOLATED, SUB_GHZ_BAND_EOL, 0, 0);
     menu_sub_ghz_exit();
     xQueueReset(main_q_hdl);
     m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
@@ -6241,7 +6318,10 @@ static const struct {
     { 345000000UL, SUB_GHZ_BAND_345,    "345.000" },
     { 390000000UL, SUB_GHZ_BAND_390,    "390.000" },
     { 433920000UL, SUB_GHZ_BAND_433_92, "433.920" },
-    { 868350000UL, SUB_GHZ_BAND_915,    "868.350" },
+    /* 868.350 MHz (EU SRD): use CUSTOM so sub_ghz_set_opmode actually retunes
+     * via SI446x_Set_Frequency.  Mapping it onto SUB_GHZ_BAND_915 here would
+     * silently broadcast on 915 MHz (illegal in EU). */
+    { 868350000UL, SUB_GHZ_BAND_CUSTOM, "868.350" },
     { 915000000UL, SUB_GHZ_BAND_915,    "915.000" }
 };
 #define SUBGHZ_REPEATER_FREQ_COUNT \
@@ -6628,12 +6708,15 @@ void sub_ghz_repeater(void)
     sub_ghz_set_opmode(SUB_GHZ_OPMODE_ISOLATED, SUB_GHZ_BAND_EOL, 0, 0);
     menu_sub_ghz_exit();
 
+    /* Order matters: the TIM1_CC ISR may still fire one or two pulses after
+     * sub_ghz_pulse_capture_disarm() during ringbuffer drain, and it inserts
+     * via subghz_rx_rawdata_rb.pdata.  Set pdata to NULL FIRST, issue a
+     * memory-barrier so the ISR sees the new value, and only then free the
+     * underlying storage.  Otherwise we risk an ISR write into freed heap. */
+    subghz_rx_rawdata_rb.pdata = NULL;
+    __DMB();
     if (capture) vPortFree(capture);
     if (ring_storage) vPortFree(ring_storage);
-    /* Leave subghz_rx_rawdata_rb pdata pointing at freed memory; it will
-     * be re-initialised by sub_ghz_ring_buffers_init() the next time the
-     * record/replay path runs. */
-    subghz_rx_rawdata_rb.pdata = NULL;
 
     xQueueReset(main_q_hdl);
     m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
