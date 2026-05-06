@@ -26,6 +26,7 @@
 //#include "U8g2lib.h"
 #include "m1_compile_cfg.h"
 #include "m1_lcd.h"
+#include "m1_lcd_dma.h"
 #ifdef M1_APP_RPC_ENABLE
 #include "m1_rpc.h"
 #endif
@@ -36,6 +37,11 @@
  * the current 18.75 MHz) is skipped entirely.  Audit 07 finding "framebuffer
  * dirty check via HW CRC32 of the tile buffer". */
 extern CRC_HandleTypeDef hcrc;
+
+/* DMA TX timeout for a full ST7567 page (8 page slices of 128 bytes plus a
+ * handful of cmd byte handoffs).  At 18.75 MHz wire rate the full frame is
+ * ~440us; 50 ms is 100x headroom and matches other peripheral timeouts. */
+#define M1_LCD_DMA_TIMEOUT_MS      50U
 
 /*************************** D E F I N E S ************************************/
 
@@ -75,12 +81,33 @@ uint8_t u8x8_byte_stm32_4wire_hw_spi(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int,
 	{
 		// Send one or more bytes, located at arg_ptr, arg_int contains the number of bytes.
 		case U8X8_MSG_BYTE_SEND:
-			status = HAL_SPI_Transmit(plcd_hspi, (uint8_t *) arg_ptr, arg_int, SPI_WRITE_TIMEOUT);
-			// Check status
-			if (status != HAL_OK)
+			/* DMA path: only worth the kick-off cost above ~16 bytes.  Below
+			 * that (single-cmd handoffs during init/refresh) the polled path
+			 * is faster end-to-end and lets us skip the semaphore wait.
+			 * The semaphore-take in m1_lcd_dma_wait() yields to other tasks
+			 * while the GPDMA + SPI engines drive the bus, so the menu task
+			 * gives back ~440us to FreeRTOS on every full-page push. */
+			if (m1_lcd_dma_is_available() && arg_int > 16U)
 			{
-			    return 0; // Error
-			} // if (status != HAL_OK)
+				status = HAL_SPI_Transmit_DMA(plcd_hspi, (uint8_t *)arg_ptr, arg_int);
+				if (status != HAL_OK)
+				{
+					return 0;
+				}
+				if (!m1_lcd_dma_wait(M1_LCD_DMA_TIMEOUT_MS))
+				{
+					HAL_SPI_Abort(plcd_hspi);
+					return 0;
+				}
+			}
+			else
+			{
+				status = HAL_SPI_Transmit(plcd_hspi, (uint8_t *)arg_ptr, arg_int, SPI_WRITE_TIMEOUT);
+				if (status != HAL_OK)
+				{
+					return 0; // Error
+				}
+			}
 
 			break;
 
@@ -186,6 +213,11 @@ void m1_lcd_init(SPI_HandleTypeDef *phspi)
 	assert(phspi!=NULL);
 	plcd_hspi = phspi;
 
+	/* Wire up SPI1 TX DMA before the first transfer so panel init itself
+	 * benefits.  Failure path leaves DMA disabled and the polled path
+	 * continues to work. */
+	m1_lcd_dma_init(phspi);
+
     HAL_Delay(2); // Wait for stable power after power on, > 1ms
     u8g2_Setup_st7567_enh_dg128064i_f(&m1_u8g2, U8G2_R2, u8x8_byte_stm32_4wire_hw_spi, u8x8_stm32_gpio_and_delay);
 	u8g2_InitDisplay(&m1_u8g2);
@@ -211,6 +243,25 @@ void m1_lcd_init(SPI_HandleTypeDef *phspi)
 	m1_lcd_force_redraw();
 
 } // void m1_lcd_init(SPI_HandleTypeDef *phspi)
+
+
+/*============================================================================*/
+/* HAL SPI TxCpltCallback override.
+ *
+ * The HAL ships a weak default that does nothing; we install a strong one
+ * here that signals the LCD DMA semaphore for SPI1 transfers and is a no-op
+ * for any other SPI instance (SPI2 = NFC + Si4463 is still polled).
+ */
+/*============================================================================*/
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi == plcd_hspi)
+    {
+        BaseType_t hpw = pdFALSE;
+        m1_lcd_dma_signal_complete_from_isr(&hpw);
+        portYIELD_FROM_ISR(hpw);
+    }
+}
 
 
 /*============================================================================*/

@@ -442,6 +442,7 @@ target_sources(m1_01 INTERFACE
     ../../m1_csrc/m1_infrared.c
     ../../m1_csrc/m1_int_hdl.c
     ../../m1_csrc/m1_lcd.c
+    ../../m1_csrc/m1_lcd_dma.c
     ../../m1_csrc/m1_led_indicator.c
     ../../m1_csrc/m1_lib.c
     ../../m1_csrc/m1_log_debug.c
