@@ -38,6 +38,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
+#include <stdlib.h>
+#include "ff.h"
 
 /* Externals owned by m1_infrared.c */
 extern QueueHandle_t main_q_hdl;
@@ -57,17 +59,31 @@ extern QueueHandle_t button_events_q_hdl;
  * every real TV remote does for a single keypress.  Sony SIRC requires the
  * frame be sent three times back-to-back to be reliably accepted, so we use
  * 3 there.
+ *
+ * SD card override (audit 07 finding "TV-B-Gone code DB from SD"):
+ *   At app start we try /IR/tvbgone.txt on the SD card.  Format:
+ *
+ *      # comment line, blank lines OK
+ *      BRAND,PROTOCOL,ADDRESS,COMMAND,REPEATS
+ *
+ *   PROTOCOL is the integer IRMP_*_PROTOCOL value (e.g. 2 = IRMP_NEC_PROTOCOL).
+ *   ADDRESS / COMMAND are decimal or 0x-prefixed hex.  REPEATS is 1..8.
+ *
+ *   On any failure (SD not present, file missing, parse error after >= 1
+ *   valid line) we fall back to the hardcoded list so the feature never
+ *   regresses below the pre-SD baseline.
  *---------------------------------------------------------------------------*/
 typedef struct
 {
-    const char *brand;     /* short label for UI */
-    uint8_t     protocol;  /* IRMP_*_PROTOCOL */
+    char        brand[24];   /* short label for UI; copied so the SD path can
+                              * own its own string buffer */
+    uint8_t     protocol;    /* IRMP_*_PROTOCOL */
     uint16_t    address;
     uint16_t    command;
-    uint8_t     repeats;   /* number of frames to send (1 = single, >=2 = with auto-repeat) */
+    uint8_t     repeats;     /* number of frames to send (1 = single, >=2 = with auto-repeat) */
 } tvbgone_code_t;
 
-static const tvbgone_code_t s_codes[] =
+static const tvbgone_code_t s_default_codes[] =
 {
     /* NEC family --------------------------------------------------------- */
     { "Samsung",    IRMP_NEC_PROTOCOL,        0x0707, 0x02FD, 2 },
@@ -95,12 +111,145 @@ static const tvbgone_code_t s_codes[] =
     { "Sony Bravia",IRMP_SIRCS_PROTOCOL,      0x0001, 0x0095, 3 },
     { "Sony older", IRMP_SIRCS_PROTOCOL,      0x0001, 0x0015, 3 },
 };
-#define TVBGONE_CODE_COUNT  ((uint8_t)(sizeof(s_codes) / sizeof(s_codes[0])))
+#define TVBGONE_DEFAULT_COUNT  ((uint8_t)(sizeof(s_default_codes) / sizeof(s_default_codes[0])))
+
+/* Runtime DB: filled either from SD or the default table.  Capacity = 96
+ * is plenty for a curated power-off database (the upstream "TV-B-Gone"
+ * project ships ~70 codes).  Each entry is 32 bytes -> ~3 KB BSS. */
+#define TVBGONE_RUNTIME_MAX    96U
+static tvbgone_code_t s_runtime_codes[TVBGONE_RUNTIME_MAX];
+static uint8_t        s_runtime_count = 0U;
+/* Pointer + count the rest of the file uses; either points to the runtime
+ * table (when populated) or to the const default table.  The const cast on
+ * the read path is safe because no caller writes via this pointer. */
+static const tvbgone_code_t *s_codes        = s_default_codes;
+static uint8_t               s_codes_count  = TVBGONE_DEFAULT_COUNT;
+#define TVBGONE_CODE_COUNT  s_codes_count
 
 /* Inter-brand gap (ms).  The IRSND auto-repeat already inserts protocol
  * specific repeat-frame pauses (~108ms for NEC, ~45ms for SIRC) so we only
  * add a small extra gap so users can see the on-screen brand cycle.       */
 #define TVBGONE_BRAND_GAP_MS    50U
+
+/* SD path for the curated database.  Looked up at app entry; missing file
+ * is not an error (we fall back to the hardcoded list). */
+#define TVBGONE_SD_DB_PATH      "0:/IR/tvbgone.txt"
+
+/*===========================================================================*/
+/**
+ * @brief   Parse a single tvbgone.txt line of the form
+ *
+ *              BRAND,PROTOCOL,ADDRESS,COMMAND,REPEATS
+ *
+ *          BRAND is up to 23 chars (no commas).  PROTOCOL/ADDRESS/COMMAND
+ *          accept "0x"-prefixed hex or plain decimal.  REPEATS clamps to
+ *          [1,8].  Lines starting with '#' or only whitespace are skipped.
+ *
+ * @return  true if the line was a valid code entry, false otherwise.
+ */
+/*===========================================================================*/
+static bool tvbgone_parse_line(const char *line, tvbgone_code_t *out)
+{
+    const char *p = line;
+    const char *brand_start;
+    size_t      brand_len;
+    char       *endp;
+    long        protocol_l, address_l, command_l, repeats_l;
+
+    /* Skip leading whitespace */
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0' || *p == '#' || *p == '\r' || *p == '\n')
+        return false;
+
+    /* Brand field — up to first comma */
+    brand_start = p;
+    while (*p && *p != ',') p++;
+    if (*p != ',')
+        return false;
+    brand_len = (size_t)(p - brand_start);
+    if (brand_len == 0U || brand_len >= sizeof(out->brand))
+        return false;
+
+    p++; /* skip comma */
+
+    /* Protocol */
+    protocol_l = strtol(p, &endp, 0);
+    if (endp == p || *endp != ',')
+        return false;
+    p = endp + 1;
+
+    /* Address */
+    address_l = strtol(p, &endp, 0);
+    if (endp == p || *endp != ',')
+        return false;
+    p = endp + 1;
+
+    /* Command */
+    command_l = strtol(p, &endp, 0);
+    if (endp == p || *endp != ',')
+        return false;
+    p = endp + 1;
+
+    /* Repeats */
+    repeats_l = strtol(p, &endp, 0);
+    if (endp == p)
+        return false;
+
+    if (protocol_l < 0 || protocol_l > 0x7F)        return false;
+    if (address_l  < 0 || address_l  > 0xFFFF)      return false;
+    if (command_l  < 0 || command_l  > 0xFFFF)      return false;
+    if (repeats_l  < 1)  repeats_l = 1;
+    if (repeats_l  > 8)  repeats_l = 8;
+
+    memcpy(out->brand, brand_start, brand_len);
+    out->brand[brand_len] = '\0';
+    out->protocol = (uint8_t)protocol_l;
+    out->address  = (uint16_t)address_l;
+    out->command  = (uint16_t)command_l;
+    out->repeats  = (uint8_t)repeats_l;
+    return true;
+}
+
+/*===========================================================================*/
+/**
+ * @brief   Try to load /IR/tvbgone.txt from the SD card.  On success replace
+ *          s_codes with the runtime table.  On any failure leave the
+ *          hardcoded default in place.
+ *
+ *          Idempotent within an app session — only the first call does work.
+ */
+/*===========================================================================*/
+static void tvbgone_try_load_sd_db(void)
+{
+    static bool loaded_once = false;
+    if (loaded_once)
+        return;
+    loaded_once = true;
+
+    FIL fp;
+    FRESULT fr = f_open(&fp, TVBGONE_SD_DB_PATH, FA_READ | FA_OPEN_EXISTING);
+    if (fr != FR_OK)
+        return;
+
+    char line[96];
+    uint8_t parsed = 0U;
+    while (f_gets(line, sizeof(line), &fp) != NULL && parsed < TVBGONE_RUNTIME_MAX)
+    {
+        if (tvbgone_parse_line(line, &s_runtime_codes[parsed]))
+        {
+            parsed++;
+        }
+    }
+    f_close(&fp);
+
+    if (parsed > 0U)
+    {
+        s_runtime_count = parsed;
+        s_codes         = s_runtime_codes;
+        s_codes_count   = parsed;
+    }
+    /* else: parse failed or file empty — keep the hardcoded fallback. */
+}
 
 /* Maximum time (ms) we wait for the IRSND TX state machine to drain a single
  * code before bailing out.  In practice every code completes well under this
@@ -415,6 +564,10 @@ static bool tvbgone_blast_all(void)
 void app_tvbgone_run(void)
 {
     bool repeat;
+
+    /* Try to extend the in-flash code list with /IR/tvbgone.txt — silent
+     * fallback on missing/invalid SD file. */
+    tvbgone_try_load_sd_db();
 
     tvbgone_flush_queue();
     infrared_encode_sys_init();
