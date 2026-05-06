@@ -759,6 +759,31 @@ static void ep_close_connection(int conn_id)
     spi_AT_send_recv(cmd, s_ep_at_buf, sizeof(s_ep_at_buf), EP_AT_TIMEOUT_SHORT);
 }
 
+/* Match common captive-portal probe URLs. Modern OS clients fire one
+ * of these probes immediately after associating to an open SSID;
+ * answering with HTTP 302 -> http://192.168.4.1/ forces them to open
+ * the captive-portal browser. Without this, iOS/Android/Windows
+ * silently mark "no internet" and refuse to auto-pop the sheet. */
+static bool ep_is_captive_probe_path(const char *path, int path_len)
+{
+    static const char *PROBES[] = {
+        "/generate_204",                /* Android, ChromeOS */
+        "/gen_204",                     /* Android pre-9 */
+        "/hotspot-detect.html",         /* iOS, macOS */
+        "/library/test/success.html",   /* iOS legacy */
+        "/ncsi.txt",                    /* Windows NCSI */
+        "/connecttest.txt",             /* Windows 10/11 */
+        "/success.txt",                 /* Mozilla / Firefox */
+    };
+    int n = (int)(sizeof(PROBES) / sizeof(PROBES[0]));
+    for (int i = 0; i < n; i++) {
+        size_t plen = strlen(PROBES[i]);
+        if (path_len >= (int)plen && strncmp(path, PROBES[i], plen) == 0)
+            return true;
+    }
+    return false;
+}
+
 /*============================================================================*/
 /**
   * @brief Parse a fully reassembled HTTP request payload and act on it.
@@ -776,6 +801,52 @@ static void ep_handle_request(int conn_id, const char *data, int data_len)
     if (data_len > 11 && strncmp(data, "POST /login", 11) == 0)
     {
         is_post_login = true;
+    }
+    else if (data_len > 5 && strncmp(data, "GET /", 5) == 0)
+    {
+        const char *path = data + 4;
+        const char *path_end = strchr(path, ' ');
+        int path_len = (path_end != NULL) ? (int)(path_end - path)
+                                          : (data_len - 4);
+        if (path_len > 0 && ep_is_captive_probe_path(path, path_len))
+        {
+            /* Direct 302 send - cannot use ep_send_response because
+             * it always emits text/html and no Location header. */
+            static const char REDIRECT_BODY[] =
+                "<html><body><a href=\"http://192.168.4.1/\">"
+                "Click to sign in</a></body></html>";
+            char hdr[256];
+            int hlen = snprintf(hdr, sizeof(hdr),
+                "HTTP/1.1 302 Found\r\n"
+                "Location: http://192.168.4.1/\r\n"
+                "Content-Type: text/html; charset=UTF-8\r\n"
+                "Content-Length: %u\r\n"
+                "Cache-Control: no-store\r\n"
+                "Connection: close\r\n\r\n",
+                (unsigned)(sizeof(REDIRECT_BODY) - 1));
+            int total = hlen + (int)(sizeof(REDIRECT_BODY) - 1);
+            char cmd[64];
+            static char rsend[1024];
+            snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d,%d\r\n",
+                     conn_id, total);
+            if (spi_AT_send_recv(cmd, s_ep_at_buf, sizeof(s_ep_at_buf),
+                                 EP_AT_TIMEOUT_SHORT) == SUCCESS &&
+                strstr(s_ep_at_buf, "ERROR") == NULL)
+            {
+                int rcopy = hlen;
+                if (rcopy > (int)sizeof(rsend) - 1) rcopy = (int)sizeof(rsend) - 1;
+                memcpy(rsend, hdr, rcopy);
+                int rroom = (int)sizeof(rsend) - 1 - rcopy;
+                int rb = (int)(sizeof(REDIRECT_BODY) - 1);
+                if (rb > rroom) rb = rroom;
+                memcpy(rsend + rcopy, REDIRECT_BODY, rb);
+                rsend[rcopy + rb] = '\0';
+                spi_AT_send_recv(rsend, s_ep_at_buf, sizeof(s_ep_at_buf),
+                                 EP_AT_TIMEOUT_LONG);
+            }
+            ep_close_connection(conn_id);
+            return;
+        }
     }
 
     /* Find body */
