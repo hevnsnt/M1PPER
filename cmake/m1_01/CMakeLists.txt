@@ -153,19 +153,6 @@ target_sources(m1_01 INTERFACE
     ../../Drivers/u8g2_csrc/u8x8_byte.c
     ../../Drivers/u8g2_csrc/u8x8_cad.c
     ../../Drivers/u8g2_csrc/u8x8_capture.c
-    # TODO (Phase 7 audit 07 cmake/m1_01/CMakeLists.txt:155-244):
-    # Only u8x8_d_st7565.c family is used (u8g2_Setup_st7567_enh_dg128064i_f
-    # in m1_lcd.c).  Trimming the source list to just that family will cause
-    # link errors because Drivers/u8g2_csrc/u8g2_d_setup.c references symbols
-    # from every driver file.  Two options for a follow-up:
-    #   (a) trim u8g2_d_setup.c to keep only u8g2_Setup_st7567_enh_dg128064i_f
-    #       and the helpers it needs.  Lowest risk if done with a vendored
-    #       copy of u8g2_d_setup.c rather than editing the upstream copy
-    #       (which complicates u8g2 version bumps).
-    #   (b) add #ifdef U8G2_USE_* guards to u8g2_d_setup.c and define just
-    #       U8G2_USE_HVLINE_SPEED_OPTIMIZATION + the st7565/st7567 family.
-    # ~50 KB of compile time + ~1 s link time savings; -gc-sections already
-    # discards the unused symbols at link time so flash footprint is unchanged.
     ../../Drivers/u8g2_csrc/u8x8_d_a2printer.c
     ../../Drivers/u8g2_csrc/u8x8_d_ch1120.c
     ../../Drivers/u8g2_csrc/u8x8_d_gp1247ai.c
