@@ -516,6 +516,23 @@ target_sources(m1_01 INTERFACE
     ../../m1_csrc/app_subghz_playlist.c
     # === POCSAG pager decoder ===
     ../../m1_csrc/app_pocsag.c
+    # === C3.6: NFC extended attacks ===
+    ../../m1_csrc/app_nfc_magic.c
+    ../../m1_csrc/app_nfc_nested.c
+    ../../m1_csrc/app_nfc_emv.c
+    # === C3.6: BLE BLEPTD + GATT ===
+    ../../m1_csrc/app_bleptd.c
+    ../../m1_csrc/app_ble_gatt.c
+    # === C3.6: WiFi Evil Portal + Net Recon ===
+    ../../m1_csrc/app_evil_portal.c
+    ../../m1_csrc/app_net_recon.c
+    # === C3.6: Sub-GHz RF Visualizer + TPMS ===
+    ../../m1_csrc/app_rf_visualizer.c
+    ../../m1_csrc/app_tpms.c
+    # === C3.6: Tools TV-B-Gone + TOTP + iButton ===
+    ../../m1_csrc/app_tvbgone.c
+    ../../m1_csrc/app_totp.c
+    ../../m1_csrc/app_ibutton.c
 )
 
 target_link_directories(m1_01 INTERFACE

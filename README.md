@@ -54,7 +54,7 @@ Every feature in M1PPER is fully implemented. No stubs. No "coming soon." Every 
 
 ---
 
-## C3.5 Features (Latest Release)
+## C3.6 Features (Latest Release)
 
 ### On-Device Mfkey32: NFC Key Recovery
 
@@ -85,6 +85,121 @@ POCSAG is an old pager protocol that still carries real traffic. The Si4463 rece
 - Auto-baud cycling between 512/1200/2400 bps with OK key toggle
 - Scrolling 4-line message log on display
 - BCH error correction with syndrome computation (poly 0x769)
+
+### BLEPTD: BLE Privacy Threat Detector
+
+Port of haxorthematrix/BLEPTD, fully integrated as a standalone M1PPER application. Continuously scans BLE advertisements and classifies detected devices against a 55+ signature database covering trackers, wearables, audio devices, phones, medical devices, and smart home hardware.
+
+- 55+ device signatures matching company ID, manufacturer payload bytes, and service UUIDs
+- Threat levels 0-3 with automatic alert highlighting for high-threat devices (AirTag, Galaxy Tag, Tile)
+- Medical device protection: glucose monitors and pacemaker monitors marked `[PROT]`, never transmittable
+- 4-tab UI: SCAN (live device list sorted by threat), FILTER (category toggles), TX (broadcast selected profile), SETUP
+- Confusion mode: round-robin broadcast of all transmittable profiles with rotating random MACs
+- Exports device log to `/BLE/bleptd_log.txt`
+
+### BLE GATT Browser
+
+Connect to any nearby BLE device and enumerate its full GATT service/characteristic tree.
+
+- Scan, select, and connect to any BLE peripheral
+- Hierarchical display: service UUID, characteristic UUID, property flags (R/W/N/I)
+- 35-entry well-known UUID lookup table (Generic Access, Battery, Device Info, HID, Heart Rate, environmental, and more)
+- Press OK on any readable characteristic to fetch and display the raw value as hex + ASCII
+
+### NFC Magic Card Write
+
+Write arbitrary UIDs to Magic cards (Gen1A, Gen2, Gen4) directly from the M1.
+
+- Gen1A: 7-bit backdoor command sequence to bypass authentication, then write block 0
+- Gen2: standard write path after dictionary auth unlock
+- Nibble-by-nibble UID entry with live display, confirm before write
+- BCC auto-calculated from entered UID bytes
+
+### MIFARE Default Key Survey
+
+Systematic factory-key sweep against all sectors of a MIFARE Classic card.
+
+- Tests 20 common default keys (FFFFFFFFFFFF, A0A1A2A3A4A5, D3F7D3F7D3F7, and 17 more) against both Key A and Key B on all 16 sectors
+- Progress display: sector/key counter with live results
+- Saves recovered sector keys to `/NFC/recovered_keys.txt`
+
+### EMV Payment Card Reader
+
+Read public data from contactless Visa, Mastercard, and Amex cards.
+
+- Full ISO 7816-4 APDU flow: SELECT PPSE, AID enumeration, SELECT AID, GET PROCESSING OPTIONS, READ RECORD
+- Extracts PAN (masked to last 4 digits), expiry date, cardholder name
+- BER-TLV parser for tags 5A, 57, 5F24, 5F20
+- Saves to `/NFC/emv_data.txt`
+
+### Evil Portal
+
+Captive portal credential harvester. Spins up an open AP, intercepts HTTP, and serves a login page.
+
+- SSID picker with presets (FreeWifi, Airport_WiFi, Hotel_Guest, Starbucks, xfinitywifi) and custom entry
+- HTML harvest page served via ESP32-C6 TCP stack (AT command TCP server on port 80)
+- Parses POST `email=` and `password=` fields with URL decoding
+- Live screen: AP status, client count, captured credentials (scrollable)
+- Credentials appended to `/WiFi/portal_creds.txt` with timestamp
+
+### Network Recon Suite
+
+Three-tab TCP/IP reconnaissance tool requiring an active WiFi connection.
+
+- ARP Scan: ping-sweeps the /24 subnet, identifies live hosts and the gateway
+- Port Scan: probes top-20 services (SSH, HTTP, SMB, RDP, MySQL, Redis, etc.) against a user-entered IP
+- OUI Lookup: resolves the first 24 bits of any MAC against a 51-entry vendor table
+
+### RF Signal Visualizer
+
+ProtoView-style raw RF signal display. Captures OOK pulse trains from the Si4463 and renders them as a scrollable time-domain waveform.
+
+- Frequency presets: 315, 433.92, 868.35, 915 MHz and custom entry
+- Waveform displayed as high/low bars around a center line, auto-scaled to fit screen
+- Pulse width statistics: min, max, median
+- Modulation hint: single-width (carrier), two-width (PWM/OOK), three-width (Manchester), or complex
+- LEFT/RIGHT scroll, UP/DOWN zoom, OK to re-arm capture
+
+### TPMS Tire Pressure Decoder
+
+Decodes TPMS sensor broadcasts from tire pressure monitoring systems.
+
+- Supports 315 MHz and 433 MHz with selectable baud rate
+- Protocol support: Schrader (0.25 PSI/LSB), Citroen/Peugeot (kPa\*0.75), and generic
+- Manchester decoder with automatic polarity detection
+- Tracks up to 8 sensors with FL/FR/RL/RR wheel assignment
+- 4-wheel summary screen, saves to `/SubGHz/tpms_log.txt`
+
+### TV-B-Gone
+
+Universal IR power-off blaster. Cycles through power codes for 15 TV brands in sequence.
+
+- Samsung (NEC + Samsung32), LG, Toshiba, Hisense, TCL/RCA, Vizio, Haier, Insignia, Element, Sansui, Panasonic (Kaseikyo), Sharp (Denon), Philips (RC-5), Sony SIRC (×2)
+- Progress bar and brand label during transmission
+- Also accessible from the Infrared menu
+
+### TOTP/HOTP Authenticator
+
+RFC 6238 TOTP and RFC 4226 HOTP codes, computed on-device with no network required.
+
+- Self-contained SHA-1 and HMAC-SHA-1 implementation (no external crypto library)
+- RFC 4648 Base32 seed decoder
+- Reads accounts from `/TOTP/accounts.txt` (format: `Name:BASE32SECRET`)
+- Large 6-digit code display with 30-second countdown bar
+- HOTP counter persisted to `/TOTP/hotp_counters.txt` on each use
+
+### iButton 1-Wire Reader
+
+Reads Dallas/Maxim iButton ROM codes directly from the hardware GPIO.
+
+- Bit-bang 1-Wire master with DWT microsecond timing
+- Read ROM (0x33), Dallas CRC-8 validation
+- Family code identification: DS1990A/R, DS1991-1996, DS2406
+- Saves IDs to `/iButton/saved.txt`
+
+### C3.5 Features
+
+Mfkey32 on-device Crypto-1 key recovery, Sub-GHz Repeater, and POCSAG pager decoder shipped in C3.5 and remain in C3.6 unchanged.
 
 ---
 

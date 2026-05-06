@@ -87,4 +87,26 @@ extern void assert_failed();
 #define M1_APP_BLE_SPAM_ENABLE         /* Enable BLE Spam: Apple/Google/Samsung/Windows proximity popups */
 #define M1_APP_SUBGHZ_PLAYLIST_ENABLE  /* Enable SubGHz Playlist: sequential .sub/.sgh file playback */
 
+/* === NFC C3.6 features === */
+#define M1_APP_NFC_MAGIC_ENABLE        /* Enable Magic Card write (Gen1A/Gen2/Gen4) */
+#define M1_APP_NFC_NESTED_ENABLE       /* Enable MIFARE Nested/StaticNested key recovery */
+#define M1_APP_NFC_EMV_ENABLE          /* Enable EMV payment card data reader */
+
+/* === BLE C3.6 features === */
+#define M1_APP_BLEPTD_ENABLE           /* Enable BLEPTD: BLE Privacy Threat Detector */
+#define M1_APP_BLE_GATT_ENABLE         /* Enable BLE GATT browser */
+
+/* === WiFi C3.6 features === */
+#define M1_APP_EVIL_PORTAL_ENABLE      /* Enable Evil Portal: captive portal credential harvesting */
+#define M1_APP_NET_RECON_ENABLE        /* Enable TCP/IP network recon suite */
+
+/* === Sub-GHz C3.6 features === */
+#define M1_APP_RF_VISUALIZER_ENABLE    /* Enable ProtoView-style RF signal visualizer */
+#define M1_APP_TPMS_ENABLE             /* Enable TPMS tire pressure sensor decoder */
+
+/* === Tools C3.6 features === */
+#define M1_APP_TVBGONE_ENABLE          /* Enable TV-B-Gone universal IR power-off */
+#define M1_APP_TOTP_ENABLE             /* Enable TOTP/HOTP authenticator */
+#define M1_APP_IBUTTON_ENABLE          /* Enable iButton 1-Wire reader/emulator */
+
 #endif /* M1_COMPILE_CFG_H_ */

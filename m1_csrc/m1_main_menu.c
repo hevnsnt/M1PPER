@@ -60,6 +60,9 @@ extern S_M1_Menu_t menu_Apps;
 #ifdef M1_APP_OMNI_SNIFFER_ENABLE
 extern S_M1_Menu_t menu_OmniSniffer;
 #endif
+#ifdef M1_APP_BLEPTD_ENABLE
+extern S_M1_Menu_t menu_BLEPTD;
+#endif
 
 /***************************** V A R I A B L E S ******************************/
 
@@ -126,7 +129,15 @@ static S_M1_Menu_t menu_Power =
 #define ENT_OMNI
 #endif
 
-#define MAIN_MENU_COUNT  (10 + OPT_BADUSB + OPT_GAMES + OPT_APPS + OPT_OMNI)
+#ifdef M1_APP_BLEPTD_ENABLE
+#define OPT_BLEPTD  1
+#define ENT_BLEPTD  &menu_BLEPTD,
+#else
+#define OPT_BLEPTD  0
+#define ENT_BLEPTD
+#endif
+
+#define MAIN_MENU_COUNT  (10 + OPT_BADUSB + OPT_GAMES + OPT_APPS + OPT_OMNI + OPT_BLEPTD)
 
 S_M1_Menu_t menu_Main =
 {
@@ -137,6 +148,7 @@ S_M1_Menu_t menu_Main =
      ENT_GAMES
      ENT_APPS
      ENT_OMNI
+     ENT_BLEPTD
      &menu_Storage, &menu_Power, &menu_System}
 };
 

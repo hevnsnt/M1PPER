@@ -136,6 +136,30 @@ S_M1_Menu_t menu_Sub_GHz_POCSAG =
     "POCSAG", sub_ghz_pocsag, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
+/* Forward declarations for Sub-GHz extras whose structures live further
+ * down in this file (near the AGENT_SUBGHZ placeholders). They must be
+ * visible here so the menu_Sub_GHz table can reference them by address. */
+#ifdef M1_APP_TPMS_ENABLE
+extern S_M1_Menu_t menu_Sub_GHz_TPMS;
+#define M1_SUBGHZ_EXTRA_TPMS_ITEM    , &menu_Sub_GHz_TPMS
+#define M1_SUBGHZ_EXTRA_TPMS_COUNT   1
+#else
+#define M1_SUBGHZ_EXTRA_TPMS_ITEM
+#define M1_SUBGHZ_EXTRA_TPMS_COUNT   0
+#endif
+
+#ifdef M1_APP_RF_VISUALIZER_ENABLE
+extern S_M1_Menu_t menu_Sub_GHz_RF_Visualizer;
+#define M1_SUBGHZ_EXTRA_RFVIZ_ITEM   , &menu_Sub_GHz_RF_Visualizer
+#define M1_SUBGHZ_EXTRA_RFVIZ_COUNT  1
+#else
+#define M1_SUBGHZ_EXTRA_RFVIZ_ITEM
+#define M1_SUBGHZ_EXTRA_RFVIZ_COUNT  0
+#endif
+
+#define M1_SUBGHZ_EXTRA_TOTAL \
+    (M1_SUBGHZ_EXTRA_TPMS_COUNT + M1_SUBGHZ_EXTRA_RFVIZ_COUNT)
+
 #ifdef M1_APP_SUBGHZ_PLAYLIST_ENABLE
 #include "app_subghz_playlist.h"
 
@@ -146,10 +170,13 @@ S_M1_Menu_t menu_Sub_GHz_Playlist =
 
 S_M1_Menu_t menu_Sub_GHz =
 {
-    "Sub-GHz", NULL, NULL, NULL, 16, 0, menu_m1_icon_wave, NULL,
+    "Sub-GHz", NULL, NULL, NULL, (uint8_t)(16 + M1_SUBGHZ_EXTRA_TOTAL), 0,
+    menu_m1_icon_wave, NULL,
     {&menu_Sub_GHz_Record, &menu_Sub_GHz_Saved, &menu_Sub_GHz_Playlist,
      &menu_Sub_GHz_AddManually,
-     &menu_Sub_GHz_Repeater, &menu_Sub_GHz_POCSAG,
+     &menu_Sub_GHz_Repeater, &menu_Sub_GHz_POCSAG
+     M1_SUBGHZ_EXTRA_TPMS_ITEM
+     M1_SUBGHZ_EXTRA_RFVIZ_ITEM ,
      &menu_Sub_GHz_Frequency_Reader, &menu_Sub_GHz_Spectrum, &menu_Sub_GHz_RSSI,
      &menu_Sub_GHz_FreqScanner, &menu_Sub_GHz_JamDetector, &menu_Sub_GHz_JamLog, &menu_Sub_GHz_Weather,
      &menu_Sub_GHz_BruteForce, &menu_Sub_GHz_Regional_Information, &menu_Sub_GHz_Radio_Settings}
@@ -157,10 +184,13 @@ S_M1_Menu_t menu_Sub_GHz =
 #else
 S_M1_Menu_t menu_Sub_GHz =
 {
-    "Sub-GHz", NULL, NULL, NULL, 15, 0, menu_m1_icon_wave, NULL,
+    "Sub-GHz", NULL, NULL, NULL, (uint8_t)(15 + M1_SUBGHZ_EXTRA_TOTAL), 0,
+    menu_m1_icon_wave, NULL,
     {&menu_Sub_GHz_Record, &menu_Sub_GHz_Saved,
      &menu_Sub_GHz_AddManually,
-     &menu_Sub_GHz_Repeater, &menu_Sub_GHz_POCSAG,
+     &menu_Sub_GHz_Repeater, &menu_Sub_GHz_POCSAG
+     M1_SUBGHZ_EXTRA_TPMS_ITEM
+     M1_SUBGHZ_EXTRA_RFVIZ_ITEM ,
      &menu_Sub_GHz_Frequency_Reader, &menu_Sub_GHz_Spectrum, &menu_Sub_GHz_RSSI,
      &menu_Sub_GHz_FreqScanner, &menu_Sub_GHz_JamDetector, &menu_Sub_GHz_JamLog, &menu_Sub_GHz_Weather,
      &menu_Sub_GHz_BruteForce, &menu_Sub_GHz_Regional_Information, &menu_Sub_GHz_Radio_Settings}
@@ -246,6 +276,18 @@ S_M1_Menu_t menu_NFC_Detect_Reader =
     "MFKey Detect", nfc_detect_reader, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
+/* Forward declarations for NFC Magic / Default-Key-Attack / EMV menu items;
+ * the actual definitions live below the menu_NFC aggregate. */
+#ifdef M1_APP_NFC_MAGIC_ENABLE
+extern S_M1_Menu_t menu_NFC_Magic_Write;
+#endif
+#ifdef M1_APP_NFC_NESTED_ENABLE
+extern S_M1_Menu_t menu_NFC_Nested;
+#endif
+#ifdef M1_APP_NFC_EMV_ENABLE
+extern S_M1_Menu_t menu_NFC_EMV;
+#endif
+
 #ifdef M1_APP_FILE_IMPORT_ENABLE
 S_M1_Menu_t menu_NFC_Import =
 {
@@ -254,18 +296,46 @@ S_M1_Menu_t menu_NFC_Import =
 
 S_M1_Menu_t menu_NFC =
 {
-    "NFC", &menu_nfc_init, menu_nfc_deinit, NULL, 7, 0, menu_m1_icon_nfc, NULL,
+    "NFC", &menu_nfc_init, menu_nfc_deinit, NULL, 10, 0, menu_m1_icon_nfc, NULL,
     {&menu_NFC_Read, &menu_NFC_Saved, &menu_NFC_Add_Manually, &menu_NFC_Import,
-     &menu_NFC_Extra_Actions, &menu_NFC_Tools, &menu_NFC_Detect_Reader}
+     &menu_NFC_Extra_Actions, &menu_NFC_Tools, &menu_NFC_Detect_Reader,
+     &menu_NFC_Magic_Write, &menu_NFC_Nested, &menu_NFC_EMV}
 };
 #else
 S_M1_Menu_t menu_NFC =
 {
-    "NFC", &menu_nfc_init, menu_nfc_deinit, NULL, 6, 0, menu_m1_icon_nfc, NULL,
+    "NFC", &menu_nfc_init, menu_nfc_deinit, NULL, 9, 0, menu_m1_icon_nfc, NULL,
     {&menu_NFC_Read, &menu_NFC_Saved, &menu_NFC_Add_Manually,
-     &menu_NFC_Extra_Actions, &menu_NFC_Tools, &menu_NFC_Detect_Reader}
+     &menu_NFC_Extra_Actions, &menu_NFC_Tools, &menu_NFC_Detect_Reader,
+     &menu_NFC_Magic_Write, &menu_NFC_Nested, &menu_NFC_EMV}
 };
 #endif
+
+/*------------------------- > NFC Magic / Attack ------------------------------*/
+/* === AGENT_NFC: insert NFC Magic, Nested, EMV menu items here === */
+#ifdef M1_APP_NFC_MAGIC_ENABLE
+#include "app_nfc_magic.h"
+S_M1_Menu_t menu_NFC_Magic_Write =
+{
+    "Magic Write", app_nfc_magic_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_NFC_MAGIC_ENABLE */
+
+#ifdef M1_APP_NFC_NESTED_ENABLE
+#include "app_nfc_nested.h"
+S_M1_Menu_t menu_NFC_Nested =
+{
+    "Default Key Attack", app_nfc_nested_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_NFC_NESTED_ENABLE */
+
+#ifdef M1_APP_NFC_EMV_ENABLE
+#include "app_nfc_emv.h"
+S_M1_Menu_t menu_NFC_EMV =
+{
+    "EMV Card Read", app_nfc_emv_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_NFC_EMV_ENABLE */
 
 /*----------------------------- > Infrared -----------------------------------*/
 
@@ -284,10 +354,24 @@ S_M1_Menu_t menu_Infrared_Saved_Remotes =
     "Replay", infrared_saved_remotes, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
+#ifdef M1_APP_TVBGONE_ENABLE
+extern S_M1_Menu_t menu_TVBGone;
+#endif
+
 S_M1_Menu_t menu_Infrared =
 {
-    "Infrared", menu_infrared_init, NULL, NULL, 3, 0, menu_m1_icon_infrared, NULL,
-    {&menu_Infrared_Universal_Remotes, &menu_Infrared_Learn_New_Remote, &menu_Infrared_Saved_Remotes}
+    "Infrared", menu_infrared_init, NULL, NULL,
+#ifdef M1_APP_TVBGONE_ENABLE
+    4,
+#else
+    3,
+#endif
+    0, menu_m1_icon_infrared, NULL,
+    {&menu_Infrared_Universal_Remotes, &menu_Infrared_Learn_New_Remote, &menu_Infrared_Saved_Remotes
+#ifdef M1_APP_TVBGONE_ENABLE
+     , &menu_TVBGone
+#endif
+    }
 };
 
 /*------------------------------- > GPIO -------------------------------------*/
@@ -522,6 +606,12 @@ extern S_M1_Menu_t menu_Wifi_Karma;
 extern S_M1_Menu_t menu_Wifi_Handshake_Capture;
 extern S_M1_Menu_t menu_Wifi_Wardrive;
 extern S_M1_Menu_t menu_Wifi_Evil_Twin;
+#ifdef M1_APP_EVIL_PORTAL_ENABLE
+extern S_M1_Menu_t menu_Wifi_Evil_Portal;
+#endif
+#ifdef M1_APP_NET_RECON_ENABLE
+extern S_M1_Menu_t menu_Wifi_Net_Recon;
+#endif
 
 S_M1_Menu_t menu_Wifi_Deauth_Flood =
 {
@@ -569,14 +659,27 @@ S_M1_Menu_t menu_Wifi_Offensive_Tools =
     .sub_func = menu_wifi_offensive_init,
     .deinit_func = NULL,
     .xkey_handler = NULL,
+#if defined(M1_APP_EVIL_PORTAL_ENABLE) && defined(M1_APP_NET_RECON_ENABLE)
+    .num_submenu_items = 10,
+#elif defined(M1_APP_EVIL_PORTAL_ENABLE) || defined(M1_APP_NET_RECON_ENABLE)
+    .num_submenu_items = 9,
+#else
     .num_submenu_items = 8,
+#endif
     .reserved = 0,
     .icon_ptr = NULL,
     .gui_menu_update = NULL,
     .submenu = {&menu_Wifi_Deauth_Flood, &menu_Wifi_Beacon_Spam,
                 &menu_Wifi_Probe_Sniff, &menu_Wifi_PMKID_Capture,
                 &menu_Wifi_Karma, &menu_Wifi_Handshake_Capture,
-                &menu_Wifi_Wardrive, &menu_Wifi_Evil_Twin}
+                &menu_Wifi_Wardrive, &menu_Wifi_Evil_Twin,
+#ifdef M1_APP_EVIL_PORTAL_ENABLE
+                &menu_Wifi_Evil_Portal,
+#endif
+#ifdef M1_APP_NET_RECON_ENABLE
+                &menu_Wifi_Net_Recon,
+#endif
+                }
 };
 #endif /* M1_APP_WIFI_OFFENSIVE_ENABLE */
 
@@ -648,6 +751,16 @@ S_M1_Menu_t menu_Bluetooth_BleSpam =
     "BLE Spam", ble_spam_run, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
+#ifdef M1_APP_BLE_GATT_ENABLE
+extern S_M1_Menu_t menu_BLE_GATT;
+S_M1_Menu_t menu_Bluetooth =
+{
+    "Bluetooth", menu_bluetooth_init, NULL, NULL, 8, 0, menu_m1_icon_bluetooth, NULL,
+    {&menu_Bluetooth_Scan, &menu_Bluetooth_Saved, &menu_Bluetooth_Advertise,
+     &menu_Bluetooth_BadBT, &menu_Bluetooth_BTName,
+     &menu_Bluetooth_BleSpam, &menu_BLE_GATT, &menu_Bluetooth_Info}
+};
+#else
 S_M1_Menu_t menu_Bluetooth =
 {
     "Bluetooth", menu_bluetooth_init, NULL, NULL, 7, 0, menu_m1_icon_bluetooth, NULL,
@@ -655,6 +768,7 @@ S_M1_Menu_t menu_Bluetooth =
      &menu_Bluetooth_BadBT, &menu_Bluetooth_BTName,
      &menu_Bluetooth_BleSpam, &menu_Bluetooth_Info}
 };
+#endif
 #else /* BLE_SPAM disabled */
 S_M1_Menu_t menu_Bluetooth =
 {
@@ -784,11 +898,54 @@ S_M1_Menu_t menu_RGBBacklight =
     "RGB Backlight", app_rgb_backlight_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
 };
 
+/* Forward declarations for the new Tools apps so menu_Apps can reference
+ * them even though their definitions are emitted further down the file. */
+#ifdef M1_APP_TVBGONE_ENABLE
+extern S_M1_Menu_t menu_TVBGone;
+#endif
+#ifdef M1_APP_TOTP_ENABLE
+extern S_M1_Menu_t menu_TOTP;
+#endif
+#ifdef M1_APP_IBUTTON_ENABLE
+extern S_M1_Menu_t menu_iButton;
+#endif
+
+/* Compute the Apps submenu count at compile-time so the new tools entries
+ * are only counted when their feature flags are defined. */
+#define M1_MENU_APPS_BASE_COUNT  8
+#if defined(M1_APP_TVBGONE_ENABLE)
+  #define M1_MENU_APPS_TVBG    1
+#else
+  #define M1_MENU_APPS_TVBG    0
+#endif
+#if defined(M1_APP_TOTP_ENABLE)
+  #define M1_MENU_APPS_TOTP    1
+#else
+  #define M1_MENU_APPS_TOTP    0
+#endif
+#if defined(M1_APP_IBUTTON_ENABLE)
+  #define M1_MENU_APPS_IBUT    1
+#else
+  #define M1_MENU_APPS_IBUT    0
+#endif
+#define M1_MENU_APPS_COUNT  (M1_MENU_APPS_BASE_COUNT + M1_MENU_APPS_TVBG \
+                             + M1_MENU_APPS_TOTP + M1_MENU_APPS_IBUT)
+
 S_M1_Menu_t menu_Apps =
 {
-    "Apps", NULL, NULL, NULL, 8, 0, menu_m1_icon_apps, NULL,
+    "Apps", NULL, NULL, NULL, M1_MENU_APPS_COUNT, 0, menu_m1_icon_apps, NULL,
     {&menu_DabTimer, &menu_DvdLogo, &menu_SystemDashboard, &menu_FileTools,
-     &menu_ESP32Link, &menu_Clock, &menu_HexViewer, &menu_Apps_Browser}
+     &menu_ESP32Link, &menu_Clock, &menu_HexViewer, &menu_Apps_Browser
+#ifdef M1_APP_TVBGONE_ENABLE
+     , &menu_TVBGone
+#endif
+#ifdef M1_APP_TOTP_ENABLE
+     , &menu_TOTP
+#endif
+#ifdef M1_APP_IBUTTON_ENABLE
+     , &menu_iButton
+#endif
+    }
 };
 #endif /* M1_APP_APPS_ENABLE */
 
@@ -801,6 +958,96 @@ S_M1_Menu_t menu_OmniSniffer =
     "Omni-Sniffer", app_omni_sniffer_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
 };
 #endif /* M1_APP_OMNI_SNIFFER_ENABLE */
+
+/*------------------------------ > BLEPTD ------------------------------------*/
+/* === AGENT_BLE: insert BLEPTD menu items here === */
+#ifdef M1_APP_BLEPTD_ENABLE
+#include "app_bleptd.h"
+S_M1_Menu_t menu_BLEPTD =
+{
+    "BLE Threat Detect", app_bleptd_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_BLEPTD_ENABLE */
+
+/*------------------------------ > BLE GATT ----------------------------------*/
+/* === AGENT_BLE: insert BLE GATT menu items here === */
+#ifdef M1_APP_BLE_GATT_ENABLE
+#include "app_ble_gatt.h"
+S_M1_Menu_t menu_BLE_GATT =
+{
+    "BLE GATT Browser", app_ble_gatt_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_BLE_GATT_ENABLE */
+
+/*------------------------------ > Evil Portal --------------------------------*/
+/* === AGENT_WIFI: insert Evil Portal menu items here === */
+#ifdef M1_APP_EVIL_PORTAL_ENABLE
+#include "app_evil_portal.h"
+S_M1_Menu_t menu_Wifi_Evil_Portal =
+{
+    "Evil Portal", app_evil_portal_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_EVIL_PORTAL_ENABLE */
+
+/*------------------------------ > Net Recon ---------------------------------*/
+/* === AGENT_WIFI: insert Net Recon menu items here === */
+#ifdef M1_APP_NET_RECON_ENABLE
+#include "app_net_recon.h"
+S_M1_Menu_t menu_Wifi_Net_Recon =
+{
+    "Net Recon", app_net_recon_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_NET_RECON_ENABLE */
+
+/*------------------------------ > RF Visualizer ------------------------------*/
+/* === AGENT_SUBGHZ: insert RF Visualizer menu items here === */
+#ifdef M1_APP_RF_VISUALIZER_ENABLE
+#include "app_rf_visualizer.h"
+S_M1_Menu_t menu_Sub_GHz_RF_Visualizer =
+{
+    "RF Visualizer", app_rf_visualizer_run, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+#endif /* M1_APP_RF_VISUALIZER_ENABLE */
+
+/*------------------------------ > TPMS --------------------------------------*/
+/* === AGENT_SUBGHZ: insert TPMS menu items here === */
+#ifdef M1_APP_TPMS_ENABLE
+#include "app_tpms.h"
+S_M1_Menu_t menu_Sub_GHz_TPMS =
+{
+    "TPMS Decoder", app_tpms_run, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+#endif /* M1_APP_TPMS_ENABLE */
+
+/*------------------------------ > TV-B-Gone ---------------------------------*/
+/* === AGENT_TOOLS: insert TV-B-Gone menu items here === */
+#ifdef M1_APP_TVBGONE_ENABLE
+#include "app_tvbgone.h"
+S_M1_Menu_t menu_TVBGone =
+{
+    "TV-B-Gone", app_tvbgone_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_TVBGONE_ENABLE */
+
+/*------------------------------ > TOTP --------------------------------------*/
+/* === AGENT_TOOLS: insert TOTP menu items here === */
+#ifdef M1_APP_TOTP_ENABLE
+#include "app_totp.h"
+S_M1_Menu_t menu_TOTP =
+{
+    "TOTP Auth", app_totp_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_TOTP_ENABLE */
+
+/*------------------------------ > iButton -----------------------------------*/
+/* === AGENT_TOOLS: insert iButton menu items here === */
+#ifdef M1_APP_IBUTTON_ENABLE
+#include "app_ibutton.h"
+S_M1_Menu_t menu_iButton =
+{
+    "iButton Read", app_ibutton_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_IBUTTON_ENABLE */
 
 /***************************** V A R I A B L E S ******************************/
 
