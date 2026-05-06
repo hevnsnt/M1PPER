@@ -59,6 +59,12 @@ void m1_u8g2_firstpage(void);
 uint8_t m1_u8g2_nextpage(void);
 void m1_lcd_cleardisplay(void);
 
+/* Invalidate the dirty-check cache so the next m1_u8g2_nextpage() pushes
+ * unconditionally.  Must be called after any operation that mutates the
+ * display state outside the u8g2 framebuffer (power save toggle, contrast
+ * change, native rotation flip).  Cheap (one store). */
+void m1_lcd_force_redraw(void);
+
 extern u8g2_t m1_u8g2;
 extern QueueHandle_t	lcdspi_q_hdl;
 extern SPI_HandleTypeDef *plcd_hspi;

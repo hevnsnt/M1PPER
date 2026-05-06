@@ -967,17 +967,104 @@ static void rpc_handle_button_click(const S_RPC_Frame *f)
 /*============================================================================*/
 
 /**
+ * @brief  Detect whether a path attempts to escape the SD root.
+ *         Rejects:
+ *           - any "..": .. as own component, /..  ../  embedded
+ *           - any drive prefix other than "0:"  (so RPC peer cannot reach
+ *             a different FatFs volume even if one is later registered)
+ *           - any embedded NUL inside the declared length
+ *
+ *  Returns true if the path is OK to use, false if it must be rejected.
+ *
+ *  SECURITY (audit 06-security #2 / Phase 5.5): without this check the
+ *  RPC peer can supply paths like "../foo", "0:/System/wifi_cred.ini" or
+ *  "1:/anywhere" and overwrite the encrypted credential file, settings
+ *  file, or write a .m1app under 0:/apps/ that auto-runs. The previous
+ *  code only prepended "0:/" — it did not look for "..".
+ */
+static bool rpc_path_is_safe(const char *path)
+{
+    if (path == NULL || path[0] == '\0')
+        return false;
+
+    /* Reject drive prefixes other than "0:". */
+    if (path[1] == ':' && path[0] != '0')
+        return false;
+
+    const char *p = path;
+    while (*p)
+    {
+        /* "..":  start-of-path, after '/', or after ':' — every form of a
+         * dot-dot component that FatFs would honor. */
+        if (p[0] == '.' && p[1] == '.')
+        {
+            char prev = (p == path) ? '\0' : *(p - 1);
+            char next = p[2];
+            bool prev_is_sep = (prev == '\0' || prev == '/' || prev == '\\' || prev == ':');
+            bool next_is_sep = (next == '\0' || next == '/' || next == '\\');
+            if (prev_is_sep && next_is_sep)
+                return false;
+        }
+        p++;
+    }
+    return true;
+}
+
+/**
+ * @brief  Detect whether a path lives inside the protected /System/ tree.
+ *         Compares case-insensitively; rejects both "0:/System/..." and
+ *         "/System/..." forms.
+ */
+static bool rpc_path_in_system(const char *path)
+{
+    /* Skip drive prefix if present. */
+    const char *p = path;
+    if (p[0] == '0' && p[1] == ':')
+        p += 2;
+    if (*p == '/')
+        p++;
+
+    const char *sys = "System/";
+    for (size_t i = 0; sys[i]; i++)
+    {
+        char a = p[i];
+        if (a >= 'a' && a <= 'z') a = (char)(a - 'a' + 'A');
+        char b = sys[i];
+        if (b >= 'a' && b <= 'z') b = (char)(b - 'a' + 'A');
+        if (a != b)
+            return false;
+    }
+    return true;
+}
+
+/**
  * @brief  Build a full SD card path from the RPC payload path.
  *         Prepends "0:/" if the path doesn't already start with it.
+ *
+ *  Returns true if the resulting path is safe to use, false if the input
+ *  contained a traversal token or invalid drive prefix and the caller
+ *  must NACK the request.
  */
-static void rpc_build_sd_path(char *out, size_t out_size,
-                               const uint8_t *payload, uint16_t len)
+static bool rpc_build_sd_path(char *out, size_t out_size,
+                              const uint8_t *payload, uint16_t len)
 {
     /* Ensure null-terminated string from payload */
     char raw_path[256];
     uint16_t copy_len = (len < sizeof(raw_path) - 1) ? len : sizeof(raw_path) - 1;
     memcpy(raw_path, payload, copy_len);
     raw_path[copy_len] = '\0';
+
+    /* Reject embedded NULs inside the declared length — those would
+     * truncate raw_path and let an attacker hide a traversal token in
+     * the tail. */
+    for (uint16_t i = 0; i < copy_len; i++)
+    {
+        if (payload[i] == '\0' && i + 1 < copy_len)
+            return false;
+    }
+
+    if (!rpc_path_is_safe(raw_path))
+        return false;
 
     /* Check if path already has drive prefix */
     if (raw_path[0] == '0' && raw_path[1] == ':')
@@ -993,6 +1080,7 @@ static void rpc_build_sd_path(char *out, size_t out_size,
         else
             snprintf(out, out_size, "0:/%s", raw_path);
     }
+    return true;
 }
 
 
@@ -1025,9 +1113,18 @@ static void rpc_handle_file_list(const S_RPC_Frame *f)
     }
 
     if (f->len > 0)
-        rpc_build_sd_path(path, sizeof(path), f->payload, f->len);
+    {
+        if (!rpc_build_sd_path(path, sizeof(path), f->payload, f->len))
+        {
+            M1_LOG_I(M1_LOGDB_TAG, "FILE_LIST: path traversal rejected\r\n");
+            m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+            return;
+        }
+    }
     else
+    {
         strcpy(path, SDCARD_DEFAULT_DRIVE_PATH);
+    }
 
     M1_LOG_I(M1_LOGDB_TAG, "FILE_LIST: path='%s'\r\n", path);
 
@@ -1157,7 +1254,12 @@ static void rpc_handle_file_read(const S_RPC_Frame *f)
         return;
     }
 
-    rpc_build_sd_path(path, sizeof(path), f->payload, f->len);
+    if (!rpc_build_sd_path(path, sizeof(path), f->payload, f->len))
+    {
+        M1_LOG_I(M1_LOGDB_TAG, "FILE_READ: path traversal rejected\r\n");
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
 
     FRESULT res = f_open(&file, path, FA_READ);
     if (res != FR_OK)
@@ -1240,7 +1342,27 @@ static void rpc_handle_file_write_start(const S_RPC_Frame *f)
 
     /* Build path */
     char path[256];
-    rpc_build_sd_path(path, sizeof(path), &f->payload[4], f->len - 4);
+    if (!rpc_build_sd_path(path, sizeof(path), &f->payload[4], f->len - 4))
+    {
+        M1_LOG_I(M1_LOGDB_TAG, "FILE_WRITE_START: path traversal rejected\r\n");
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
+
+    /* Forbid RPC writes into the protected /System/ tree (audit 06-security
+     * #2). qMonstatek deliberately treats /System as read-only — that's
+     * where the encrypted wifi credential file, settings.cfg, and per-app
+     * config blobs live. Allowing remote overwrite of those would let an
+     * attacker plant a known WiFi key to harvest the user's network or
+     * disable security toggles. */
+    if (rpc_path_in_system(path))
+    {
+        M1_LOG_E(M1_LOGDB_TAG,
+                 "FILE_WRITE_START: refusing remote write into /System ('%s')\r\n",
+                 path);
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
 
     /* Open file for writing (create/truncate) */
     FRESULT res = f_open(&s_file_write.file, path,
@@ -1343,7 +1465,20 @@ static void rpc_handle_file_delete(const S_RPC_Frame *f)
     }
 
     char path[256];
-    rpc_build_sd_path(path, sizeof(path), f->payload, f->len);
+    if (!rpc_build_sd_path(path, sizeof(path), f->payload, f->len))
+    {
+        M1_LOG_I(M1_LOGDB_TAG, "FILE_DELETE: path traversal rejected\r\n");
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
+    if (rpc_path_in_system(path))
+    {
+        M1_LOG_E(M1_LOGDB_TAG,
+                 "FILE_DELETE: refusing remote delete inside /System ('%s')\r\n",
+                 path);
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
 
     FRESULT res = f_unlink(path);
     if (res != FR_OK)
@@ -1374,7 +1509,20 @@ static void rpc_handle_file_mkdir(const S_RPC_Frame *f)
     }
 
     char path[256];
-    rpc_build_sd_path(path, sizeof(path), f->payload, f->len);
+    if (!rpc_build_sd_path(path, sizeof(path), f->payload, f->len))
+    {
+        M1_LOG_I(M1_LOGDB_TAG, "FILE_MKDIR: path traversal rejected\r\n");
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
+    if (rpc_path_in_system(path))
+    {
+        M1_LOG_E(M1_LOGDB_TAG,
+                 "FILE_MKDIR: refusing remote mkdir inside /System ('%s')\r\n",
+                 path);
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
 
     FRESULT res = f_mkdir(path);
     if (res != FR_OK && res != FR_EXIST)
@@ -1673,6 +1821,20 @@ static void rpc_handle_fw_update_start(const S_RPC_Frame *f)
  * Payload: [offset:4 LE] [data:1024]
  *
  * Writes directly to flash using bl_flash_if_write().
+ *
+ * SECURITY (audit 06-security #1, Phase 5.3): every byte of (offset, data_len)
+ * is attacker-controlled. Without bounds checks this lets a USB-CDC peer
+ * write arbitrary 16-byte-aligned data anywhere past the inactive bank
+ * base — e.g. into the option bytes / OEM2 / OEM lock area. Validate:
+ *   - offset + data_len fits within total_size declared by FW_UPDATE_START
+ *   - resulting write_addr stays inside [inactive_base, inactive_base + bank)
+ *   - offset is monotonic / contiguous with bytes_written so the host can't
+ *     skip-forward to write only the parts that pass post-write CRC32 check
+ *
+ * NOTE: this firmware build INTENTIONALLY does NOT verify a cryptographic
+ * signature on the new image (Phase 5.1/5.2 skipped). bounds-checking +
+ * RPC pairing handshake is the only authenticity boundary we have. TODO:
+ * add Ed25519 / ECDSA P-256 signature verification per PLAN.md Phase 5.1.
  */
 static void rpc_handle_fw_update_data(const S_RPC_Frame *f)
 {
@@ -1694,6 +1856,58 @@ static void rpc_handle_fw_update_data(const S_RPC_Frame *f)
                       ((uint32_t)f->payload[3] << 24);
 
     uint16_t data_len = f->len - 4;
+
+    /* --- Bounds check 1: offset + data_len <= declared total_size ------- */
+    /* Use uint64 add so we catch wrap-around on offset == 0xFFFFFFFC. */
+    uint64_t end_off = (uint64_t)offset + (uint64_t)data_len;
+    if (end_off > (uint64_t)s_fw_update.total_size)
+    {
+        M1_LOG_E(M1_LOGDB_TAG,
+                 "FW_UPDATE_DATA: offset %lu + len %u exceeds total_size %lu\r\n",
+                 (unsigned long)offset, (unsigned)data_len,
+                 (unsigned long)s_fw_update.total_size);
+        HAL_FLASH_Lock();
+        s_fw_update.active = false;
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
+
+    /* --- Bounds check 2: write_addr stays inside the inactive bank ------ */
+    uint32_t inactive_base = FW_START_ADDRESS + M1_FLASH_BANK_SIZE;
+    uint32_t inactive_end  = inactive_base + M1_FLASH_BANK_SIZE; /* exclusive */
+    uint32_t write_addr_u32 = (uint32_t)(uintptr_t)s_fw_update.flash_addr + offset;
+    if (write_addr_u32 < inactive_base ||
+        write_addr_u32 + data_len > inactive_end)
+    {
+        M1_LOG_E(M1_LOGDB_TAG,
+                 "FW_UPDATE_DATA: write_addr 0x%08lX..0x%08lX outside inactive bank [0x%08lX..0x%08lX)\r\n",
+                 (unsigned long)write_addr_u32,
+                 (unsigned long)(write_addr_u32 + data_len),
+                 (unsigned long)inactive_base,
+                 (unsigned long)inactive_end);
+        HAL_FLASH_Lock();
+        s_fw_update.active = false;
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
+
+    /* --- Bounds check 3: monotonic / contiguous offsets ------------------ */
+    /* The host streams the image sequentially. A non-monotonic or skipping
+     * offset is either a bug or an attacker probing for write-anywhere.
+     * Allow exact contiguous writes (offset == bytes_written) and reject
+     * everything else. */
+    if (offset != s_fw_update.bytes_written)
+    {
+        M1_LOG_E(M1_LOGDB_TAG,
+                 "FW_UPDATE_DATA: non-monotonic offset %lu (expected %lu)\r\n",
+                 (unsigned long)offset,
+                 (unsigned long)s_fw_update.bytes_written);
+        HAL_FLASH_Lock();
+        s_fw_update.active = false;
+        m1_rpc_send_nack(f->seq, RPC_ERR_INVALID_PAYLOAD);
+        return;
+    }
+
     uint8_t *write_addr = s_fw_update.flash_addr + offset;
 
     m1_wdt_reset();

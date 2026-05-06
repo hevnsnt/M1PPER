@@ -25,9 +25,17 @@
 //#include "u8x8.h"
 //#include "U8g2lib.h"
 #include "m1_compile_cfg.h"
+#include "m1_lcd.h"
 #ifdef M1_APP_RPC_ENABLE
 #include "m1_rpc.h"
 #endif
+
+/* Access to the on-chip HW CRC unit, configured in MX_CRC_Init() (main.c).
+ * Used for framebuffer dirty-check skip: when nothing has changed since the
+ * last m1_u8g2_nextpage() the SPI push (and the ~440us blocking transfer at
+ * the current 18.75 MHz) is skipped entirely.  Audit 07 finding "framebuffer
+ * dirty check via HW CRC32 of the tile buffer". */
+extern CRC_HandleTypeDef hcrc;
 
 /*************************** D E F I N E S ************************************/
 
@@ -196,6 +204,12 @@ void m1_lcd_init(SPI_HandleTypeDef *phspi)
 	//Set power save mode ON to clear any unwanted objects displayed on the LCD unexpectedly after POR
 	u8g2_SetPowerSave(&m1_u8g2, true);
 
+	/* First post-boot frame must always push — the panel may have any prior
+	 * state and our local CRC cache is uninitialized before the first call.
+	 * The sentinel value already in s_lcd_last_crc handles this; explicit
+	 * call here is documentation more than action. */
+	m1_lcd_force_redraw();
+
 } // void m1_lcd_init(SPI_HandleTypeDef *phspi)
 
 
@@ -226,23 +240,68 @@ void m1_u8g2_firstpage(void)
 
 /*============================================================================*/
 /*
- * This function is the equivalent of the function uint8_t u8g2_NextPage(u8g2_t *u8g2)
+ * Framebuffer dirty-check via HW CRC32.
+ *
+ * The display tile buffer is 128 * (64/8) = 1024 bytes.  Pushing it over SPI
+ * at 18.75 MHz takes ~440 us blocking on the menu task's stack — that's
+ * tens of frames per second wasted when the UI is idle (clock tick, idle
+ * pulse animations, status panels that haven't changed).  We hash the tile
+ * buffer through the on-chip HW CRC unit (~1 cycle/word -> 64 cycles for
+ * 1 KB, 200x cheaper than the SPI push) and skip the push entirely if the
+ * CRC matches the previously-pushed frame.
+ *
+ * Cache management:
+ *   - s_lcd_last_crc starts at "force-push" sentinel so the first frame
+ *     after boot or any caller of m1_lcd_force_redraw always pushes.
+ *   - m1_lcd_force_redraw() invalidates the cache for callers that flip
+ *     the display state outside the u8g2 buffer (power save, contrast,
+ *     hardware rotation, etc.).
  */
 /*============================================================================*/
+#define M1_LCD_FORCE_REDRAW_SENTINEL    0xDEADBEEFUL
+static uint32_t s_lcd_last_crc = M1_LCD_FORCE_REDRAW_SENTINEL;
+
+void m1_lcd_force_redraw(void)
+{
+    s_lcd_last_crc = M1_LCD_FORCE_REDRAW_SENTINEL;
+}
+
 uint8_t m1_u8g2_nextpage(void)
 {
-	u8g2_SendBuffer(&m1_u8g2);
-	u8x8_RefreshDisplay( u8g2_GetU8x8(&m1_u8g2) );
+    uint8_t  *bp     = u8g2_GetBufferPtr(&m1_u8g2);
+    uint16_t  bytes  = (uint16_t)(u8g2_GetBufferTileWidth(&m1_u8g2) * 8U *
+                                  u8g2_GetBufferTileHeight(&m1_u8g2));
+    uint32_t  words  = (uint32_t)(bytes / 4U);
+    uint32_t  crc    = M1_LCD_FORCE_REDRAW_SENTINEL;
+
+    if (bp != NULL && words > 0U)
+    {
+        /* HAL_CRC_Calculate processes 32-bit words; the framebuffer is 1024
+         * bytes -> 256 words at 128x64.  Buffer is 4-byte aligned because
+         * u8g2_t embeds it after a uint32_t-aligned struct. */
+        crc = HAL_CRC_Calculate(&hcrc, (uint32_t *)(uintptr_t)bp, words);
+    }
+
+    if (crc != s_lcd_last_crc)
+    {
+        u8g2_SendBuffer(&m1_u8g2);
+        u8x8_RefreshDisplay( u8g2_GetU8x8(&m1_u8g2) );
+        s_lcd_last_crc = crc;
 
 #ifdef M1_APP_RPC_ENABLE
-	/* Notify the RPC task that a new frame is ready for streaming */
-	if (m1_rpc_screen_streaming_active())
-	{
-		m1_rpc_notify_screen_update();
-	}
+        /* Notify the RPC task that a new frame is ready for streaming.  Only
+         * publish on actual frame change so qMonstatek isn't spammed with
+         * identical frames. */
+        if (m1_rpc_screen_streaming_active())
+        {
+            m1_rpc_notify_screen_update();
+        }
 #endif
+    }
+    /* If the frame is unchanged we still return success — callers expect a
+     * page-loop progression even when the SPI push is elided. */
 
-	return 0;
+    return 0;
 } // uint8_t m1_u8g2_nextpage(void)
 
 
