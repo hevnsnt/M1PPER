@@ -22,6 +22,26 @@
  * values.  When the user presses OK we increment the counter and re-write
  * that file.
  *
+ * SECURITY GAP — KNOWN, TRACKED (audit 06-security low + 05-app-layer
+ * high / Phase 5.9):
+ *   The shared secrets are stored on the SD card in PLAINTEXT.  Anyone
+ *   who removes the SD card or boots the device into a state where the
+ *   SD card is exposed (e.g. stolen device, .m1app dump) can read every
+ *   2FA secret.  The intended fix is:
+ *     1. On first run, prompt the user to set a PIN.
+ *     2. Derive an AES key from the PIN via PBKDF2-HMAC-SHA1, ~10K iters.
+ *     3. Encrypt accounts.txt + hotp_accounts.txt with that key (using
+ *        m1_crypto_encrypt_with_key from m1_crypto.c, IV from TRNG).
+ *     4. Cache the derived key in RAM after PIN entry; clear on app exit.
+ *   This change requires UI work for the PIN-entry screen and a one-shot
+ *   migration path that re-encrypts existing plaintext files. It is
+ *   tracked as Phase 5.9 in PLAN.md and intentionally NOT implemented
+ *   in this build — the rest of Phase 5 (RPC bounds, ELF sandbox, TRNG
+ *   IVs) was prioritised to close the immediately exploitable network
+ *   surface first. m1_crypto_encrypt_with_key now fail-closes on TRNG
+ *   error (Phase 5.11) so the PIN-encryption path will inherit a
+ *   sound primitive when implemented.
+ *
  * M1 Project
  */
 

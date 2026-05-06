@@ -1945,7 +1945,23 @@ static void rpc_handle_fw_update_finish(const S_RPC_Frame *f)
      * in the binary itself.  Only NACK if CRC extension IS present but
      * the CRC doesn't match (indicates write corruption).
      * Firmware without CRC extension (plain .bin) is allowed through
-     * for backward compatibility. */
+     * for backward compatibility.
+     *
+     * SECURITY GAP — TRACKED (Phase 5.1/5.2 in PLAN.md, intentionally
+     * skipped in this build): this is a CRC-32 only path. CRC-32 is
+     * NOT a cryptographic authenticator — anyone able to write the
+     * inactive bank (RPC, SD, DFU) can produce a valid CRC for any
+     * payload. The corresponding mitigations are:
+     *   5.1 Ed25519 (or ECDSA P-256) signature verification in
+     *       boot_recovery_check + bl_verify_bank_crc; refuse swap of
+     *       unsigned bank.
+     *   5.2 Verification key in TrustZone secure partition or
+     *       RDP-Level-2 sector.
+     * Until those land, the only authenticity boundary is the
+     * write-side gating: the FW_UPDATE_DATA bounds-check (above) and
+     * the host-pairing handshake (Phase 5.4). Document this so any
+     * downstream caller is aware that "CRC verified OK" does NOT mean
+     * "this is signed firmware". */
     uint32_t inactive_base = FW_START_ADDRESS + M1_FLASH_BANK_SIZE;
     uint32_t crc_ext_offset = FW_CRC_EXT_BASE - FW_START_ADDRESS;
     const S_M1_FW_CRC_EXT_t *crc_ext =

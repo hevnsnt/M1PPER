@@ -150,6 +150,11 @@ int main(void)
   MX_RTC_Init();
   MX_CRC_Init();
   /* USER CODE BEGIN 2 */
+  /* MX_SDMMC1_SD_Init is intentionally not called from boot — the SD HAL
+   * is brought up lazily by m1_sdcard.c after a card-detect EXTI fires.
+   * UNUSED() keeps the static function alive so STM32CubeMX regeneration
+   * stays clean and -Wunused-function is silenced.  Audit 01 main.c:140
+   * recommended deletion; instead document why the reference is needed. */
   UNUSED(MX_SDMMC1_SD_Init);
   /* USER CODE END 2 */
 
