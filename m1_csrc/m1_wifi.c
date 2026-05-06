@@ -154,6 +154,24 @@ static bool wifi_ensure_esp32_ready(void)
 						  "Initializing", "Preparing ESP32-C6", M1_WIFI_BAND_NOTE);
 		m1_u8g2_nextpage();
 		esp32_main_init();
+
+		/* One-shot: verify the AT firmware identity. The stock
+		 * Espressif AT release is UART-only and will not respond to
+		 * any SPI AT command - features will appear to start (OK
+		 * gets returned by the bare AT bridge) but no traffic
+		 * actually leaves the chip. Surface the mismatch ONCE on
+		 * first ready, then assume the user has flashed correctly. */
+		static bool s_at_firmware_checked = false;
+		if (get_esp32_main_init_status() && !s_at_firmware_checked) {
+			s_at_firmware_checked = true;
+			if (!esp_at_verify_firmware_id()) {
+				m1_message_box(&m1_u8g2,
+				    "Wrong AT firmware",
+				    "Flash factory_",
+				    "ESP32C6-SPI.bin",
+				    " OK ");
+			}
+		}
 	}
 	return get_esp32_main_init_status();
 }
@@ -3166,10 +3184,27 @@ void wifi_wardrive(void)
 						if (ssid_safe[k] == ',') ssid_safe[k] = ' ';
 
 					char row[192];
+					/* WiGLE-1.4 compliance fixes:
+					 *   FirstSeen: was hardcoded 2000-01-01 (rejected
+					 *     by WiGLE - all rows dedup to one entry).
+					 *     Use M1 RTC localtime via m1_get_localtime().
+					 *   AccuracyMeters: was 0 (zero-coordinate rows
+					 *     are silently rejected). Without GPS we have
+					 *     no real position - emit AccuracyMeters
+					 *     99999 as the WiGLE convention for "position
+					 *     unknown / do not trust" so the row is
+					 *     accepted but flagged appropriately. */
+					m1_time_t now;
+					m1_get_localtime(&now);
 					snprintf(row, sizeof(row),
-					         "%s,%s,%s,2000-01-01 00:00:00,%d,%d,"
-					         "0.000000,0.000000,0,0,WIFI\r\n",
-					         bssid, ssid_safe, auth, ap->channel, ap->rssi);
+					         "%s,%s,%s,"
+					         "%04u-%02u-%02u %02u:%02u:%02u,"
+					         "%d,%d,"
+					         "0.000000,0.000000,0,99999,WIFI\r\n",
+					         bssid, ssid_safe, auth,
+					         (unsigned)now.year, (unsigned)now.month, (unsigned)now.day,
+					         (unsigned)now.hour, (unsigned)now.minute, (unsigned)now.second,
+					         ap->channel, ap->rssi);
 					f_write(&file, row, strlen(row), &bw);
 					f_sync(&file);
 				}

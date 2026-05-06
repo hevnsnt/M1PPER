@@ -5,8 +5,32 @@
  *
  * Sends AT+ZIGSNIFF commands to ESP32-C6 and parses +ZIGFRAME responses.
  * Builds a deduplicated device list and displays it on the LCD.
- * Two entry points: zigbee_scan() and thread_scan() — same logic,
+ * Two entry points: zigbee_scan() and thread_scan() - same logic,
  * different protocol filter ('Z' vs 'T').
+ *
+ * AT+ZIGSNIFF SUPPORT STATUS
+ * --------------------------
+ * As of factory_ESP32C6-SPI-XIAO.bin (build dated 2026-04), the
+ * ESP-AT command list (esp_at_list.h) declares only WiFi/BLE custom
+ * commands -- AT+ZIGSNIFF is NOT registered. This sniff feature
+ * therefore returns ERROR on every channel and surfaces "No devices
+ * found" regardless of nearby Zigbee/Thread traffic.
+ *
+ * TODO (ESP32 firmware change required):
+ *   1. Add AT+ZIGSNIFF=<enable>[,<channel>] to esp_at_list.h.
+ *   2. In esp_at_custom_cmd implementation, call:
+ *        esp_ieee802154_enable() then
+ *        esp_ieee802154_set_promiscuous(true) and
+ *        esp_ieee802154_receive() per channel.
+ *   3. Forward each frame as "+ZIGFRAME:<proto>,<ftype>,<len>,<ch>,
+ *      <rssi>,<lqi>,<dst_pan>,<dst_addr>,<src_pan>,<src_addr>,<hex>".
+ *   4. Run a 50ms drain loop in the AT firmware so unsolicited frames
+ *      arrive at the master before being flushed by the next AT poll.
+ *
+ * Until that lands, the runtime ieee802154_start_sniffer call below
+ * recognizes the ERROR response and surfaces a clear "AT firmware
+ * does not support 802.15.4 sniff - flash new factory_ESP32C6-SPI"
+ * message instead of "No devices found".
  */
 
 #include <stdint.h>
@@ -415,12 +439,22 @@ static void ieee802154_scan(char filter_proto)
         /* Start/switch channel */
         if (!ieee802154_start_sniffer(ch, resp_buf, sizeof(resp_buf)))
         {
-            char err_msg[44];
-            strncpy(err_msg, resp_buf, 40);
-            err_msg[40] = '\0';
-            for (int i = 0; err_msg[i]; i++)
-                if (err_msg[i] == '\r' || err_msg[i] == '\n') err_msg[i] = ' ';
-            ieee802154_display_panel(title, "Sniffer start failed", err_msg, "BACK to exit");
+            /* Most likely cause on stock ESP-AT: AT+ZIGSNIFF is not
+             * a registered custom command (see file header for
+             * required ESP-side change). Surface that explicitly. */
+            if (ch == 11) {
+                ieee802154_display_panel(title,
+                    "AT firmware lacks",
+                    "802.15.4 sniff support",
+                    "Flash newer ESP-AT");
+            } else {
+                char err_msg[44];
+                strncpy(err_msg, resp_buf, 40);
+                err_msg[40] = '\0';
+                for (int i = 0; err_msg[i]; i++)
+                    if (err_msg[i] == '\r' || err_msg[i] == '\n') err_msg[i] = ' ';
+                ieee802154_display_panel(title, "Sniffer start failed", err_msg, "BACK to exit");
+            }
             goto wait_exit;
         }
 
