@@ -191,6 +191,15 @@ void NFC_PicoPass_Listening_DeInit(void)
   * @param[in]  Length : number of bytes to write
   * @return     BSP status
   */
+/* Audit Item 17: previous 2000ms HAL timeout meant a wedged ST25R3916
+ * could lock the UI for 2 seconds per byte (8x for FIFO bursts).  100ms
+ * is still ~50x the legitimate worst-case (RFAL inter-byte SPI burst
+ * completes inside 1 ms even under retry).  On timeout we surface the
+ * error and reset the chip so the next call has a chance to recover. */
+#define M1_NFC_SPI_TIMEOUT_MS  100U
+
+extern ReturnCode st25r3916Initialize(void);  /* forward decl from RFAL */
+
 int32_t BSP_NFC0XCOMM_SendRecv(const uint8_t * const pTxData, uint8_t * const pRxData, uint16_t Length)
 {
   HAL_StatusTypeDef status = HAL_ERROR;
@@ -198,26 +207,35 @@ int32_t BSP_NFC0XCOMM_SendRecv(const uint8_t * const pTxData, uint8_t * const pR
 
   if((pTxData != NULL) && (pRxData != NULL))
   {
-    status = HAL_SPI_TransmitReceive(&COMM_HANDLE, (uint8_t *)pTxData, (uint8_t *)pRxData, Length, 2000);
+    status = HAL_SPI_TransmitReceive(&COMM_HANDLE, (uint8_t *)pTxData, (uint8_t *)pRxData, Length, M1_NFC_SPI_TIMEOUT_MS);
   }
   else if ((pTxData != NULL) && (pRxData == NULL))
   {
-    status = HAL_SPI_Transmit(&COMM_HANDLE, (uint8_t *)pTxData, Length, 2000);
+    status = HAL_SPI_Transmit(&COMM_HANDLE, (uint8_t *)pTxData, Length, M1_NFC_SPI_TIMEOUT_MS);
   }
   else if ((pTxData == NULL) && (pRxData != NULL))
   {
-    status = HAL_SPI_Receive(&COMM_HANDLE, (uint8_t *)pRxData, Length, 2000);
+    status = HAL_SPI_Receive(&COMM_HANDLE, (uint8_t *)pRxData, Length, M1_NFC_SPI_TIMEOUT_MS);
   }
   else
   {
   	ret = -2; //BSP_ERROR_WRONG_PARAM;
   }
 
-  /* Check the communication status */
+  /* Check the communication status.  On timeout reset the SPI peripheral
+   * and re-initialize the ST25R3916 so subsequent calls have a clean
+   * register state instead of a wedged FSM. */
   if (status != HAL_OK)
   {
-    /* Execute user timeout callback */
-    // ret = BSP_NFC0XCOMM_Init();
+    ret = -1; /* BSP_ERROR_BUSY / TIMEOUT */
+    if (status == HAL_TIMEOUT)
+    {
+      __HAL_SPI_DISABLE(&COMM_HANDLE);
+      HAL_SPI_Abort(&COMM_HANDLE);
+      __HAL_SPI_ENABLE(&COMM_HANDLE);
+      /* Best-effort chip reinit; ignore return — caller may try again. */
+      (void)st25r3916Initialize();
+    }
   }
 
   return ret;
