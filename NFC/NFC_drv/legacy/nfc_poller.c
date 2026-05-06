@@ -69,6 +69,7 @@
 #include "logger.h"
 #include "mfc_crypto1.h"
 #include "picopass/picopass_poller.h"
+#include "st25r3916_aat.h"
 #include <stdio.h>
 
 #define NOTINIT              0     /*!< Demo State:  Not initialized        */
@@ -137,6 +138,7 @@ static rfalNfcDiscoverParam discParam;
 static uint8_t              state = NOTINIT;
 static bool                 multiSel;
 static nfc_poll_profile_t   s_poll_profile = NFC_POLL_PROFILE_NORMAL;
+static bool                 s_wakeup_enabled = false;
 
 
 /* NFC-A CE config */
@@ -611,6 +613,19 @@ nfc_poll_profile_t nfc_poller_get_profile(void)
     return s_poll_profile;
 }
 
+/* Audit Item 25: low-power wake-up toggle.  Drops idle current from
+ * ~80 mA (active polling) to <10 mA via ST25R3916 wake-up mode at the
+ * cost of one wake-up period of latency (~100 ms default). */
+void nfc_poller_set_wakeup_enabled(bool enabled)
+{
+    s_wakeup_enabled = enabled;
+}
+
+bool nfc_poller_get_wakeup_enabled(void)
+{
+    return s_wakeup_enabled;
+}
+
 
 /*============================================================================*/
 /**
@@ -645,6 +660,52 @@ bool ReadIni(void)
         vTaskDelay(5);
     }
     if (err != RFAL_ERR_NONE) return false;
+
+    /*
+     * Audit Item 5: ST25R3916 Automatic Antenna Tuning.
+     *
+     * The chip supports AAT (st25r3916_aat.c is compiled at
+     * cmake/m1_01/CMakeLists.txt:86 but was never invoked).  Without
+     * tuning, ANT_TUNE_A/B sit at RFAL defaults (or the hard-coded 0x82
+     * the test_max_power path used to pin), which gives unstable read
+     * range across units, battery levels, and operator hand position.
+     *
+     * Run AAT once after RFAL bring-up, with mid-band targets matching
+     * AN5567 reference (phase ~75 weight 1, amplitude ~95 weight 1).
+     * Cap measureLimit so the procedure cannot wedge the boot path
+     * (~50 measurements -> ~250ms worst case).
+     *
+     * Future enhancement: cache aat_a/aat_b in flash and use them as
+     * the start values on next boot for faster convergence.
+     */
+    {
+        struct st25r3916AatTuneParams ap;
+        struct st25r3916AatTuneResult ar;
+        memset(&ap, 0, sizeof(ap));
+        memset(&ar, 0, sizeof(ar));
+        ap.aat_a_min       = 0;
+        ap.aat_a_max       = 255;
+        ap.aat_a_start     = 0x80;
+        ap.aat_a_stepWidth = 32;
+        ap.aat_b_min       = 0;
+        ap.aat_b_max       = 255;
+        ap.aat_b_start     = 0x80;
+        ap.aat_b_stepWidth = 32;
+        ap.phaTarget       = 0x80;     /* AN5567 phase target */
+        ap.phaWeight       = 2;
+        ap.ampTarget       = 0xC0;     /* AN5567 amplitude target */
+        ap.ampWeight       = 1;
+        ap.doDynamicSteps  = true;
+        ap.measureLimit    = 50;       /* bound boot delay */
+
+        ReturnCode aat_err = st25r3916AatTune(&ap, &ar);
+        if (aat_err == RFAL_ERR_NONE) {
+            platformLog("[NFC] AAT tuned A=0x%02X B=0x%02X (pha=%u amp=%u, %u steps)\r\n",
+                        ar.aat_a, ar.aat_b, ar.pha, ar.amp, (unsigned)ar.measureCnt);
+        } else {
+            platformLog("[NFC] AAT tune skipped (err=%d)\r\n", aat_err);
+        }
+    }
 
     /* 2) Discovery parameters: Explicitly set for Poller-only mode */
     rfalNfcDefaultDiscParams(&discParam);
@@ -686,6 +747,12 @@ bool ReadIni(void)
 #if ST25R95
     discParam.isoDepFS       = RFAL_ISODEP_FSXI_128; /* ST25R95 Limit */
 #endif
+
+    /* Audit Item 25: low-power wake-up.  When enabled the ST25R3916
+     * runs its periodic amplitude/phase monitor, drastically cutting
+     * idle current at the cost of one wake-up period of detection
+     * latency. */
+    discParam.wakeupEnabled = s_wakeup_enabled;
 
     /* 3) Verify configuration is valid by calling Discover once, then deactivate to Idle */
     err = rfalNfcDiscover(&discParam);
@@ -1592,40 +1659,51 @@ ReturnCode nfc_poller_get_version(uint8_t *rxBuf, uint16_t rxBufLen, uint16_t *r
 bool test_nfc_continuous_carrier(uint32_t duration_ms)
 {
     ReturnCode err = RFAL_ERR_NONE;
-    
+
     platformLog("[NFC] Enabling continuous carrier (sine wave)...\r\n");
-    
+
     /* 1. First ensure RFAL is initialized */
     /* Note: You'll need to check your NFC initialization state */
     /* For now, we assume NFC is initialized */
-    
+
     /* 2. Deactivate any current NFC activity */
     rfalNfcDeactivate(RFAL_NFC_DEACTIVATE_IDLE);
-    
+
     /* 3. Turn off field if it's on */
     rfalFieldOff();
-    
-    /* 4. Configure ST25R3916 for continuous carrier transmission */
-    
-    /* Set mode to NFC (likely appropriate for continuous carrier) */
+
+    /* 4. Configure ST25R3916 for continuous carrier transmission.
+     *
+     * Audit Item 6: previously this path forced am_mod_40percent on
+     * NFC-A, which is FCC/CE non-compliant — ISO14443-A requires 100%
+     * ASK.  Gate the test-only knobs behind DEBUG_RF_BENCH; the default
+     * compliant path uses regular ISO14443-A modulation. */
+#ifdef DEBUG_RF_BENCH
+    /* DEVELOPER MODE: 40% AM continuous carrier, regulatory non-compliant */
     err = st25r3916WriteRegister(ST25R3916_REG_MODE, ST25R3916_REG_MODE_om_nfc);
     if (err != RFAL_ERR_NONE) {
         platformLog("[NFC] ERROR: Failed to set mode (err=%d)\r\n", err);
         return false;
     }
-    
-    /* Configure TX driver for MAXIMUM POWER! */
-    /* d_res = 0x0 (lowest resistance = highest power output) */
-    /* am_mod = 40% modulation (MAXIMUM available for ST25R3916!) */
-    /* WARNING: This may exceed regulatory limits in some regions */
-    uint8_t tx_driver = (ST25R3916_REG_TX_DRIVER_am_mod_40percent) | 
-                       (0x0 << ST25R3916_REG_TX_DRIVER_d_res_shift);
-    
+    uint8_t tx_driver = (ST25R3916_REG_TX_DRIVER_am_mod_40percent) |
+                        (0x0 << ST25R3916_REG_TX_DRIVER_d_res_shift);
     err = st25r3916WriteRegister(ST25R3916_REG_TX_DRIVER, tx_driver);
     if (err != RFAL_ERR_NONE) {
         platformLog("[NFC] ERROR: Failed to configure TX driver (err=%d)\r\n", err);
         return false;
     }
+#else
+    /* Compliant path: standard ISO14443-A 100% ASK + min driver
+     * resistance; field-off-only timing follows the regular discovery
+     * stop sequence. */
+    err = st25r3916WriteRegister(ST25R3916_REG_MODE, ST25R3916_REG_MODE_om_iso14443a);
+    if (err != RFAL_ERR_NONE) {
+        platformLog("[NFC] ERROR: Failed to set mode (err=%d)\r\n", err);
+        return false;
+    }
+    /* Default am_mod (no override) leaves RFAL's analogConfig value in
+     * place, which is regulator-tuned for 100% ASK. */
+#endif
     
     /* Optional: Set extended field-on guard time */
     err = st25r3916WriteRegister(ST25R3916_REG_FIELD_ON_GT, 0xFF);
@@ -1643,8 +1721,12 @@ bool test_nfc_continuous_carrier(uint32_t duration_ms)
     }
     
     platformLog("[NFC] Continuous carrier ENABLED\r\n");
-    platformLog("[NFC] Mode: 0x%02X, TX Driver: 0x%02X (5%% mod), OP Control: 0x%02X\r\n",
+#ifdef DEBUG_RF_BENCH
+    platformLog("[NFC] Mode: 0x%02X, TX Driver: 0x%02X, OP Control: 0x%02X (DEBUG_RF_BENCH)\r\n",
                ST25R3916_REG_MODE_om_nfc, tx_driver, op_control);
+#else
+    platformLog("[NFC] Mode: ISO14443A 100%% ASK, OP Control: 0x%02X\r\n", op_control);
+#endif
     
     /* 6. If duration specified, wait then turn off */
     if (duration_ms > 0) {
@@ -1735,24 +1817,32 @@ bool test_nfc_max_power_carrier(uint32_t duration_ms)
     /* 3. Turn off field if it's on */
     rfalFieldOff();
     
-    /* 4. Configure ST25R3916 for ABSOLUTE MAX POWER continuous carrier transmission */
+    /* 4. Configure ST25R3916 for continuous carrier transmission.
+     *
+     * Audit Item 6: gate the regulatory-non-compliant 40% AM + om_nfc
+     * register pair behind DEBUG_RF_BENCH.  Without that compile flag,
+     * fall back to compliant ISO14443-A modulation. */
+#ifdef DEBUG_RF_BENCH
     err = st25r3916WriteRegister(ST25R3916_REG_MODE, ST25R3916_REG_MODE_om_nfc);
     if (err != RFAL_ERR_NONE) {
         platformLog("[NFC] ERROR: Failed to set mode (err=%d)\r\n", err);
         return false;
     }
-    
-    /* Configure TX driver for MAXIMUM POWER! */
-    /* d_res = 0x0 (lowest resistance = highest power output) */
-    /* am_mod = 40%% modulation (MAX for ST25R3916) */
-    uint8_t tx_driver = (ST25R3916_REG_TX_DRIVER_am_mod_40percent) | 
-                       (0x0 << ST25R3916_REG_TX_DRIVER_d_res_shift);
-    
+    uint8_t tx_driver = (ST25R3916_REG_TX_DRIVER_am_mod_40percent) |
+                        (0x0 << ST25R3916_REG_TX_DRIVER_d_res_shift);
     err = st25r3916WriteRegister(ST25R3916_REG_TX_DRIVER, tx_driver);
     if (err != RFAL_ERR_NONE) {
         platformLog("[NFC] ERROR: Failed to configure TX driver (err=%d)\r\n", err);
         return false;
     }
+#else
+    err = st25r3916WriteRegister(ST25R3916_REG_MODE, ST25R3916_REG_MODE_om_iso14443a);
+    if (err != RFAL_ERR_NONE) {
+        platformLog("[NFC] ERROR: Failed to set mode (err=%d)\r\n", err);
+        return false;
+    }
+    /* Leave TX driver at RFAL analogConfig defaults (regulator-tuned). */
+#endif
     
     /* GAIN REDUCTION IS READ-ONLY - CAN'T CHANGE IT */
     /* The chip manages gain reduction automatically */

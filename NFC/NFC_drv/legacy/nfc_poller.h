@@ -31,6 +31,22 @@ typedef enum
 void nfc_poller_set_profile(nfc_poll_profile_t profile);
 nfc_poll_profile_t nfc_poller_get_profile(void);
 
+/**
+ * @brief Enable/disable ST25R3916 wake-up mode for low-power tag detect.
+ *
+ * When enabled, the chip enters periodic low-power amplitude/phase
+ * monitoring instead of full polling.  Idle current drops from ~80 mA
+ * (active polling) to <10 mA on AN5567-grade antennas.  Tag latency
+ * rises by one wake-up period (~100 ms default).
+ *
+ * Must be called before ReadIni() to take effect on the next discovery
+ * cycle.  Default: disabled (matches prior behavior).
+ *
+ * Audit Item 25.
+ */
+void nfc_poller_set_wakeup_enabled(bool enabled);
+bool nfc_poller_get_wakeup_enabled(void);
+
 /* --- Extern wrappers for static poller helpers --- */
 
 /** Check if SAK indicates a MIFARE Classic variant */
