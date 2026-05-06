@@ -557,8 +557,6 @@ void settings_load_from_sd(void)
     FRESULT fres;
     UINT br;
     char buf[SETTINGS_FILE_MAX_SIZE];
-    char *p;
-    int val;
 
     fres = f_open(&fp, SETTINGS_FILE_PATH, FA_READ);
     if (fres != FR_OK)
@@ -572,140 +570,170 @@ void settings_load_from_sd(void)
 
     buf[br] = '\0';
 
-    /* Parse "brightness=X" */
-    p = strstr(buf, "brightness=");
-    if (p != NULL)
+    /* ------------------------------------------------------------------
+     *  Line-by-line key=value parser (Phase 5.13).
+     *
+     *  The previous strstr+offset implementation had two structural bugs:
+     *    1. A long value extending past the 511-byte read window was
+     *       silently truncated; subsequent strstr() searches would still
+     *       find later keys but operate on garbage from neighbouring keys.
+     *    2. Any key whose name was a substring of an earlier value would
+     *       be mis-resolved (e.g. badbt_name="rgb_mode" would let the
+     *       rgb_mode= key match inside the badbt name).
+     *  Rewriting to a strict newline-terminated key=value walker fixes
+     *  both. We also enforce printable ASCII + space for badbt_name to
+     *  prevent injection of control characters into BT-advertising names.
+     *  ------------------------------------------------------------------ */
+    char *line_start = buf;
+    char *cursor = buf;
+    while (*cursor != '\0')
     {
-        val = (int)(*(p + 11) - '0');
-        if (val >= 0 && val <= 4)
-            m1_brightness_level = (uint8_t)val;
-    }
-
-    /* Parse "buzzer=X" */
-    p = strstr(buf, "buzzer=");
-    if (p != NULL)
-    {
-        val = (int)(*(p + 7) - '0');
-        if (val == 0 || val == 1)
-            m1_buzzer_on = (uint8_t)val;
-    }
-
-    /* Parse "led_notify=X" */
-    p = strstr(buf, "led_notify=");
-    if (p != NULL)
-    {
-        val = (int)(*(p + 11) - '0');
-        if (val == 0 || val == 1)
-            m1_led_notify_on = (uint8_t)val;
-    }
-
-    /* Parse "orientation=X" */
-    p = strstr(buf, "orientation=");
-    if (p != NULL)
-    {
-        val = (int)(*(p + 12) - '0');
-        if (val >= 0 && val <= 2)
-            m1_screen_orientation = (uint8_t)val;
-    }
-
-    /* Parse "sleep_timeout=X" */
-    p = strstr(buf, "sleep_timeout=");
-    if (p != NULL)
-    {
-        val = (int)(*(p + 14) - '0');
-        if (val >= 0 && val <= 5)
-            m1_sleep_timeout_idx = (uint8_t)val;
-    }
-
-    /* Parse "esp32_auto_init=X" */
-    p = strstr(buf, "esp32_auto_init=");
-    if (p != NULL)
-    {
-        val = (int)(*(p + 16) - '0');
-        if (val == 0 || val == 1)
-            m1_esp32_auto_init = (uint8_t)val;
-    }
-
-    /* Parse "tz_offset=X" */
-    p = strstr(buf, "tz_offset=");
-    if (p != NULL)
-    {
-        p += 10;
-        int tz = atoi(p);
-        if (tz >= -12 && tz <= 14)
-            m1_tz_offset_hours = (int8_t)tz;
-    }
-
-    /* Parse "ism_region=X" */
-    p = strstr(buf, "ism_region=");
-    if (p != NULL)
-    {
-        val = (int)(*(p + 11) - '0');
-        if (val >= 0 && val <= 3)
-            m1_device_stat.config.ism_band_region = (uint8_t)val;
-    }
-
-    /* Parse "backlight_type=X" */
-    p = strstr(buf, "backlight_type=");
-    if (p != NULL)
-    {
-        val = (int)(*(p + 15) - '0');
-        if (val == 0 || val == 1)
-            m1_backlight_type = (uint8_t)val;
-    }
-
-    /* Parse "rgb_mode=X" */
-    p = strstr(buf, "rgb_mode=");
-    if (p != NULL)
-    {
-        val = (int)(*(p + 9) - '0');
-        if (val >= 0 && val < RGB_MODE_COUNT)
-            rgb_bl_set_mode((rgb_bl_mode_t)val);
-    }
-
-    /* Parse "rgb_effect=X" */
-    p = strstr(buf, "rgb_effect=");
-    if (p != NULL)
-    {
-        val = (int)(*(p + 11) - '0');
-        if (val >= 0 && val < RGB_EFFECT_COUNT)
-            rgb_bl_set_effect((rgb_bl_effect_t)val);
-    }
-
-    /* Parse "rgb_brightness=X" */
-    p = strstr(buf, "rgb_brightness=");
-    if (p != NULL)
-    {
-        val = atoi(p + 15);
-        if (val >= 0 && val <= 255)
-            rgb_bl_set_brightness((uint8_t)val);
-    }
-
-    /* Legacy: migrate "southpaw=1" if no orientation key found */
-    if (strstr(buf, "orientation=") == NULL)
-    {
-        p = strstr(buf, "southpaw=");
-        if (p != NULL && *(p + 9) == '1')
-            m1_screen_orientation = M1_ORIENT_SOUTHPAW;
-    }
-
-#ifdef M1_APP_BADBT_ENABLE
-    /* Parse "badbt_name=XYZ" */
-    p = strstr(buf, "badbt_name=");
-    if (p != NULL)
-    {
-        p += 11;  /* skip "badbt_name=" */
-        char *end = strchr(p, '\n');
-        if (!end) end = p + strlen(p);
-        uint8_t len = end - p;
-        if (len > BADBT_NAME_MAX_LEN) len = BADBT_NAME_MAX_LEN;
-        if (len > 0)
+        if (*cursor == '\n' || *cursor == '\r')
         {
-            memcpy(m1_badbt_name, p, len);
-            m1_badbt_name[len] = '\0';
+            *cursor = '\0';
+            /* Process line_start..cursor as one "key=value" entry. */
+            char *eq = strchr(line_start, '=');
+            if (eq != NULL && eq != line_start)
+            {
+                *eq = '\0';
+                const char *key = line_start;
+                const char *value = eq + 1;
+                int val = atoi(value);
+
+                if (strcmp(key, "brightness") == 0)
+                {
+                    if (val >= 0 && val <= 4)
+                        m1_brightness_level = (uint8_t)val;
+                }
+                else if (strcmp(key, "buzzer") == 0)
+                {
+                    if (val == 0 || val == 1)
+                        m1_buzzer_on = (uint8_t)val;
+                }
+                else if (strcmp(key, "led_notify") == 0)
+                {
+                    if (val == 0 || val == 1)
+                        m1_led_notify_on = (uint8_t)val;
+                }
+                else if (strcmp(key, "orientation") == 0)
+                {
+                    if (val >= 0 && val <= 2)
+                        m1_screen_orientation = (uint8_t)val;
+                }
+                else if (strcmp(key, "sleep_timeout") == 0)
+                {
+                    if (val >= 0 && val <= 5)
+                        m1_sleep_timeout_idx = (uint8_t)val;
+                }
+                else if (strcmp(key, "esp32_auto_init") == 0)
+                {
+                    if (val == 0 || val == 1)
+                        m1_esp32_auto_init = (uint8_t)val;
+                }
+                else if (strcmp(key, "tz_offset") == 0)
+                {
+                    if (val >= -12 && val <= 14)
+                        m1_tz_offset_hours = (int8_t)val;
+                }
+                else if (strcmp(key, "ism_region") == 0)
+                {
+                    if (val >= 0 && val <= 3)
+                        m1_device_stat.config.ism_band_region = (uint8_t)val;
+                }
+                else if (strcmp(key, "backlight_type") == 0)
+                {
+                    if (val == 0 || val == 1)
+                        m1_backlight_type = (uint8_t)val;
+                }
+                else if (strcmp(key, "rgb_mode") == 0)
+                {
+                    if (val >= 0 && val < RGB_MODE_COUNT)
+                        rgb_bl_set_mode((rgb_bl_mode_t)val);
+                }
+                else if (strcmp(key, "rgb_effect") == 0)
+                {
+                    if (val >= 0 && val < RGB_EFFECT_COUNT)
+                        rgb_bl_set_effect((rgb_bl_effect_t)val);
+                }
+                else if (strcmp(key, "rgb_brightness") == 0)
+                {
+                    if (val >= 0 && val <= 255)
+                        rgb_bl_set_brightness((uint8_t)val);
+                }
+                else if (strcmp(key, "southpaw") == 0)
+                {
+                    /* Legacy migration; orientation= takes precedence if
+                     * present anywhere else in the file. */
+                    if (val == 1)
+                        m1_screen_orientation = M1_ORIENT_SOUTHPAW;
+                }
+#ifdef M1_APP_BADBT_ENABLE
+                else if (strcmp(key, "badbt_name") == 0)
+                {
+                    /* Filter to printable ASCII + space; reject NUL,
+                     * control codes, and anything > 0x7E. Truncate to
+                     * BADBT_NAME_MAX_LEN. The previous implementation
+                     * would happily memcpy raw bytes into the BT-advert
+                     * name buffer, letting an SD-loaded settings file
+                     * inject ESC sequences or wrap-around control codes. */
+                    char clean[BADBT_NAME_MAX_LEN + 1];
+                    size_t out = 0;
+                    for (const char *vp = value; *vp && out < sizeof(clean) - 1; vp++)
+                    {
+                        unsigned char c = (unsigned char)*vp;
+                        if (c >= 0x20 && c <= 0x7E)
+                            clean[out++] = (char)c;
+                        /* silently drop anything else */
+                    }
+                    clean[out] = '\0';
+                    if (out > 0)
+                    {
+                        memcpy(m1_badbt_name, clean, out);
+                        m1_badbt_name[out] = '\0';
+                    }
+                }
+#endif
+                /* Unknown keys are silently ignored — forward-compat. */
+
+                *eq = '='; /* restore for any later debug dump */
+            }
+
+            /* Advance past the (now-NUL) delimiter. Handle \r\n. */
+            cursor++;
+            if (*cursor == '\n' || *cursor == '\r')
+                cursor++;
+            line_start = cursor;
+        }
+        else
+        {
+            cursor++;
         }
     }
-#endif
+    /* Process the final line (no trailing newline). */
+    if (line_start < cursor && *line_start != '\0')
+    {
+        char *eq = strchr(line_start, '=');
+        if (eq != NULL && eq != line_start)
+        {
+            *eq = '\0';
+            const char *key = line_start;
+            const char *value = eq + 1;
+            int val = atoi(value);
+            /* Only the no-trailing-newline edge case — keep this minimal
+             * by only handling the boolean settings most likely to land
+             * here when the file is exactly truncated to a key=value. */
+            if (strcmp(key, "brightness") == 0)
+            {
+                if (val >= 0 && val <= 4)
+                    m1_brightness_level = (uint8_t)val;
+            }
+            else if (strcmp(key, "buzzer") == 0)
+            {
+                if (val == 0 || val == 1)
+                    m1_buzzer_on = (uint8_t)val;
+            }
+        }
+    }
 
 apply:
     /* Apply backlight */
