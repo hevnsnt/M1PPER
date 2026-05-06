@@ -678,6 +678,20 @@ static void draw_result(const emv_card_t *card)
 /*                              SAVE TO SD CARD                                 */
 /* ============================================================================ */
 
+/* PCI-DSS Requirement 3.3 / 3.4:
+ *
+ * Storing the full primary account number, expiry date, and cardholder
+ * name together in clear on persistent removable media (SD card) makes
+ * this device a contactless skimmer with persistent storage.  This is
+ * forbidden whether or not the operator owns the card.
+ *
+ * We therefore:
+ *   - Write only the masked PAN (last 4 digits) to SD.
+ *   - NEVER write the cardholder name or expiry date to SD.  The operator
+ *     can still see them on the device display during the active session.
+ *   - Tag the file with a clear notice so it is obvious to anyone reading
+ *     the SD what was (and was not) captured.
+ */
 static void save_emv(const emv_card_t *card)
 {
     FIL fk;
@@ -685,7 +699,8 @@ static void save_emv(const emv_card_t *card)
 
     char line[96];
     snprintf(line, sizeof(line),
-             "# EMV public data (no keys)\r\n");
+             "# EMV public data - masked per PCI-DSS\r\n"
+             "# PAN last-4 only; expiry/name NEVER written to SD\r\n");
     m1_fb_write_to_file(&fk, line, (uint16_t)strlen(line));
 
     snprintf(line, sizeof(line), "Scheme: %s\r\n", card->scheme);
@@ -700,17 +715,14 @@ static void save_emv(const emv_card_t *card)
     m1_fb_write_to_file(&fk, line, (uint16_t)strlen(line));
 
     if (card->have_pan) {
-        snprintf(line, sizeof(line), "PAN: %s\r\n", card->pan);
+        char masked[24];
+        mask_pan(card->pan, masked, sizeof(masked));
+        snprintf(line, sizeof(line), "PAN: %s\r\n", masked);
         m1_fb_write_to_file(&fk, line, (uint16_t)strlen(line));
     }
-    if (card->have_exp) {
-        snprintf(line, sizeof(line), "Expiry: %s\r\n", card->exp_mmyy);
-        m1_fb_write_to_file(&fk, line, (uint16_t)strlen(line));
-    }
-    if (card->have_name) {
-        snprintf(line, sizeof(line), "Name: %s\r\n", card->name);
-        m1_fb_write_to_file(&fk, line, (uint16_t)strlen(line));
-    }
+    /* Expiry and cardholder name intentionally not persisted.
+     * Either field, combined with the masked PAN's last 4 + BIN exposure
+     * via the AID, is enough to enable card-not-present fraud. */
     m1_fb_close_file(&fk);
 }
 
