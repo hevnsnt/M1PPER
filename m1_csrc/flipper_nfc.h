@@ -47,10 +47,22 @@ flipper_nfc_type_t flipper_nfc_parse_type(const char *type_str);
 /* Load dump data from a Flipper .nfc file.
  * Parses "Page N:" and "Block N:" lines into the provided buffer.
  * Returns the number of units (pages or blocks) parsed.
- * unit_size is set to 4 for pages (T2T/NTAG) or 16 for blocks (Classic). */
+ * unit_size is set to 4 for pages (T2T/NTAG) or 16 for blocks (Classic).
+ *
+ * Audit Item 16: this signature does NOT bound-check the valid_bits
+ * buffer.  Prefer flipper_nfc_load_dump_ex() which takes valid_bits_size
+ * explicitly and rejects out-of-range indices via strtoul + endptr. */
 uint16_t flipper_nfc_load_dump(const char *path,
                                uint8_t *dump_buf, uint16_t dump_buf_size,
                                uint8_t *valid_bits,
                                uint16_t *unit_size);
+
+/* Load dump data with explicit valid_bits buffer size.  Indices that
+ * exceed either dump buffer or valid_bits coverage are rejected.  Use
+ * this entry point for new code. */
+uint16_t flipper_nfc_load_dump_ex(const char *path,
+                                  uint8_t *dump_buf, uint16_t dump_buf_size,
+                                  uint8_t *valid_bits, uint16_t valid_bits_size,
+                                  uint16_t *unit_size);
 
 #endif /* FLIPPER_NFC_H_ */

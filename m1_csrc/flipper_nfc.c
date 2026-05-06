@@ -196,16 +196,30 @@ bool flipper_nfc_load(const char *path, flipper_nfc_card_t *out)
  * @param  unit_size      output: 4 for pages, 16 for blocks
  * @return Number of units (pages or blocks) successfully parsed
  */
-uint16_t flipper_nfc_load_dump(const char *path,
-                               uint8_t *dump_buf, uint16_t dump_buf_size,
-                               uint8_t *valid_bits,
-                               uint16_t *unit_size)
+/* Audit Item 16: bound-checked load.
+ *
+ * Old code used atoi() (no error reporting) and only bound-checked the
+ * dump buffer.  A line like "Page 65535: ..." would happily flip a bit
+ * 0x1FFF bytes past the caller's valid_bits[] array — a one-line .nfc
+ * file from an untrusted source could clobber unrelated globals.
+ *
+ * We now:
+ *   - parse the index with strtoul(..., &endp, 10) and require endp to
+ *     have advanced past the digits and reach a non-digit terminator
+ *   - reject idx >= unit_count_max (derived from dump_buf_size/usize)
+ *   - reject (idx >> 3) >= valid_bits_size
+ *   - cap usize at sizeof(tmp)
+ */
+uint16_t flipper_nfc_load_dump_ex(const char *path,
+                                  uint8_t *dump_buf, uint16_t dump_buf_size,
+                                  uint8_t *valid_bits, uint16_t valid_bits_size,
+                                  uint16_t *unit_size)
 {
 	flipper_file_t ff;
 	uint16_t count = 0;
 	uint16_t usize = 0;
 
-	if (!path || !dump_buf || !valid_bits || !unit_size)
+	if (!path || !dump_buf || !valid_bits || !unit_size || valid_bits_size == 0)
 		return 0;
 
 	*unit_size = 0;
@@ -213,7 +227,6 @@ uint16_t flipper_nfc_load_dump(const char *path,
 	if (!ff_open(&ff, path))
 		return 0;
 
-	/* Skip header — read lines until we find Page or Block entries */
 	while (ff_read_line(&ff))
 	{
 		if (ff_is_separator(&ff))
@@ -225,35 +238,39 @@ uint16_t flipper_nfc_load_dump(const char *path,
 		const char *key = ff_get_key(&ff);
 		const char *val = ff_get_value(&ff);
 
-		/* Match "Page N" or "Block N" */
-		bool is_page  = (strncmp(key, "Page ", 5) == 0);
+		bool is_page  = (strncmp(key, "Page ",  5) == 0);
 		bool is_block = (strncmp(key, "Block ", 6) == 0);
-
 		if (!is_page && !is_block)
 			continue;
 
-		/* Determine unit size on first match */
 		if (usize == 0)
 			usize = is_page ? 4 : 16;
+		if (usize > 16)
+			continue; /* defensive: tmp[] is 16 bytes */
 
-		/* Parse unit index */
 		const char *numStr = is_page ? (key + 5) : (key + 6);
-		uint16_t idx = (uint16_t)atoi(numStr);
+		char *endp = NULL;
+		unsigned long ul = strtoul(numStr, &endp, 10);
+		if (endp == numStr) continue;          /* no digits at all */
+		if (*endp != '\0' && *endp != ' ' && *endp != ':')
+			continue;                          /* trailing garbage */
+		if (ul > 0xFFFFUL) continue;           /* uint16 range */
+		uint16_t idx = (uint16_t)ul;
 
-		/* Parse hex bytes from value */
+		uint16_t unit_count_max = (uint16_t)(dump_buf_size / usize);
+		if (idx >= unit_count_max) continue;
+		if ((uint16_t)(idx >> 3) >= valid_bits_size) continue;
+
 		uint8_t tmp[16];
 		uint8_t parsed = ff_parse_hex_bytes(val, tmp, usize);
 		if (parsed < usize)
-			continue; /* Incomplete line */
+			continue;
 
-		/* Store into dump buffer */
 		uint32_t offset = (uint32_t)idx * usize;
 		if (offset + usize > dump_buf_size)
-			continue; /* Buffer too small */
+			continue;
 
 		memcpy(&dump_buf[offset], tmp, usize);
-
-		/* Mark unit as valid */
 		valid_bits[idx >> 3] |= (uint8_t)(1u << (idx & 7));
 
 		if (idx + 1 > count)
@@ -264,6 +281,22 @@ uint16_t flipper_nfc_load_dump(const char *path,
 
 	*unit_size = usize;
 	return count;
+}
+
+/* Backward-compatible wrapper.  Estimates valid_bits_size from
+ * dump_buf_size/min_unit and forwards to the bound-checked impl. */
+uint16_t flipper_nfc_load_dump(const char *path,
+                               uint8_t *dump_buf, uint16_t dump_buf_size,
+                               uint8_t *valid_bits,
+                               uint16_t *unit_size)
+{
+	/* Worst case: pages (4-byte units) -> 1 valid bit per 4 bytes -> 1
+	 * byte of valid_bits per 32 bytes of dump.  Older callers sized
+	 * their valid_bits[] to dump_buf_size/4/8 = dump_buf_size/32. */
+	uint16_t vbs = (uint16_t)((dump_buf_size + 31U) / 32U);
+	if (vbs == 0) vbs = 1;
+	return flipper_nfc_load_dump_ex(path, dump_buf, dump_buf_size,
+	                                valid_bits, vbs, unit_size);
 }
 
 /*============================================================================*/
