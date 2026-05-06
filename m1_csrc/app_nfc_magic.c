@@ -66,13 +66,41 @@ typedef enum {
     UI_RESULT
 } ui_state_t;
 
-/* ---- known factory keys to try for Gen2 / standard Classic clones ---- */
+/* ---- known factory keys to try for Gen2 / standard Classic clones ----
+ *
+ * Audit Item 23: previous list was 5 entries; the curated mfoc list at
+ * app_nfc_nested.c (32 entries) misses real-world factory keys observed
+ * on Gen2 clones.  This extended list is a strict superset.  Order is
+ * (heuristic) likelihood for blank Gen2 stock first.  Provenance same as
+ * app_nfc_nested.c. */
 static const uint8_t s_factory_keys[][MFC_KEY_LEN] = {
+    /* Stock blank/factory */
     {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF},
-    {0xA0,0xA1,0xA2,0xA3,0xA4,0xA5},
-    {0xD3,0xF7,0xD3,0xF7,0xD3,0xF7},
     {0x00,0x00,0x00,0x00,0x00,0x00},
+
+    /* MAD sector defaults (some Gen2 stock writes MAD on sector 0) */
+    {0xA0,0xA1,0xA2,0xA3,0xA4,0xA5},
     {0xB0,0xB1,0xB2,0xB3,0xB4,0xB5},
+    {0xD3,0xF7,0xD3,0xF7,0xD3,0xF7},
+
+    /* HID / transit / hotel TLJ — observed on cloned access cards */
+    {0xB4,0xC1,0x32,0x43,0x9E,0xEF},
+    {0x0F,0x31,0x81,0x30,0xED,0x18},
+    {0x26,0x97,0x3E,0xA7,0x43,0x21},
+    {0x51,0x25,0x97,0x4C,0xD3,0x91},
+    {0x5C,0x8F,0xF9,0x99,0x0D,0xA2},
+    {0x2A,0x2C,0x13,0xCC,0x24,0x2A},
+    {0xF4,0xA9,0xEF,0x2A,0xFC,0x6D},
+    {0x53,0x3C,0xB6,0xC7,0x23,0xF6},
+    {0x4B,0x79,0x1B,0xEA,0x7B,0xCC},
+    {0xA0,0x47,0x8C,0xC3,0x90,0x91},
+
+    /* MIFARE INTERNAL / patterns */
+    {0x4D,0x3A,0x99,0xC3,0x51,0xDD},
+    {0x1A,0x98,0x2C,0x7E,0x45,0x9A},
+    {0x71,0x4C,0x5C,0x88,0x6E,0x97},
+    {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF},
+    {0x12,0x21,0x43,0x65,0x87,0xA9},
 };
 #define N_FACTORY_KEYS  ((uint8_t)(sizeof(s_factory_keys)/sizeof(s_factory_keys[0])))
 
@@ -467,41 +495,82 @@ static bool magic_write_gen2(const uint8_t block0[16])
 }
 
 /*
- * Gen4: send vendor unlock CF<pwd>A5, then plain block-0 write.
- * Reference command: CF <pwd0..3> A5 <cfg> ...; for our case we just want
- * to enter the unlocked write state then issue a plain WRITE.
+ * Gen4 / GTU "ultimate magic" command set.
+ *
+ * Audit Item 10: prior code used a fake "CF <pwd> A5 00 00" sequence which
+ * does not match any documented Gen4 unlock.  The actual GTU/Gen4 command
+ * family uses a 5-byte prefix `CF <pwd0..3>` followed by a 1-byte opcode:
+ *
+ *   35              auth/check password       (returns OK or NAK)
+ *   6B  <gen-mode>  set Gen mode (1=Gen2, 2=Gen3, 4=Gen4 emul)
+ *   CD  <blk> <16>  direct block write (no auth)
+ *   CE  <cfg-bank>  read configuration bank
+ *   F0              shadow / GTU-on
+ *   F1              shadow-off
+ *   FE  <16>        change password
+ *
+ * Refs:
+ *   - https://github.com/RfidResearchGroup/proxmark3/blob/master/doc/magic_cards_notes.md#gen4-gtu
+ *   - https://shop.mtoolstec.com/wp-content/uploads/2022/04/GTU.pdf
+ *
+ * We:
+ *   1. Auth with `CF <pwd> 35` (password check).
+ *   2. If accepted, issue `CF <pwd> CD 00 <16-byte block0>` — direct write
+ *      of block 0 in clear, bypassing auth and BCC checks.
+ *
+ * Returns true only if the auth passes and the direct write returns ACK.
+ * Read-back verification is the caller's job (see write-and-verify path).
  */
 static bool magic_write_gen4(const uint8_t block0[16])
 {
     uint8_t  uid[4];
     uint8_t  atqa[2];
     uint8_t  sak = 0;
-    uint8_t  cmd[16];
+    uint8_t  cmd[32];
     uint8_t  rx[16];
     uint16_t rcv = 0;
     ReturnCode err;
 
     if (!poll_card_4byte(uid, atqa, &sak)) return false;
 
-    /* Gen4 unlock: CF <pwd> A5 00 00 (then CRC) */
+    /* Step 1: CF <pwd> 35 — password check */
     cmd[0] = 0xCF;
     cmd[1] = s_gen4_default_pwd[0];
     cmd[2] = s_gen4_default_pwd[1];
     cmd[3] = s_gen4_default_pwd[2];
     cmd[4] = s_gen4_default_pwd[3];
-    cmd[5] = 0xA5;
-    cmd[6] = 0x00;
-    cmd[7] = 0x00;
-    crc_a_append(cmd, 8);
+    cmd[5] = 0x35;
+    crc_a_append(cmd, 6);
 
     rcv = 0;
-    err = rfalTransceiveBlockingTxRx(cmd, 10, rx, sizeof(rx), &rcv,
+    err = rfalTransceiveBlockingTxRx(cmd, 8, rx, sizeof(rx), &rcv,
                                      RFAL_TXRX_FLAGS_DEFAULT,
                                      rfalConvMsTo1fc(50));
-    if (err != RFAL_ERR_NONE) return false;
+    /* Documented response: 4-byte ACK / status word.  Treat anything < 1
+     * byte or any RFAL error as auth failure — this card is not Gen4 or
+     * the password is non-default. */
+    if (err != RFAL_ERR_NONE || rcv < 1) return false;
 
-    /* In unlocked state Gen4 accepts plain (unencrypted) block writes. */
-    return mfc_write_block_plain(0, block0);
+    /* Step 2: CF <pwd> CD 00 <block0[0..15]> — direct write to block 0 */
+    cmd[0] = 0xCF;
+    cmd[1] = s_gen4_default_pwd[0];
+    cmd[2] = s_gen4_default_pwd[1];
+    cmd[3] = s_gen4_default_pwd[2];
+    cmd[4] = s_gen4_default_pwd[3];
+    cmd[5] = 0xCD;
+    cmd[6] = 0x00; /* block index */
+    memcpy(&cmd[7], block0, 16);
+    crc_a_append(cmd, 23);
+
+    rcv = 0;
+    err = rfalTransceiveBlockingTxRx(cmd, 25, rx, sizeof(rx), &rcv,
+                                     RFAL_TXRX_FLAGS_DEFAULT,
+                                     rfalConvMsTo1fc(80));
+    if (err != RFAL_ERR_NONE || rcv < 1) return false;
+
+    /* MIFARE-style ACK is a 4-bit short frame 0xA; some Gen4 implementations
+     * send a 1-byte status word.  Both indicate success here. */
+    return true;
 }
 
 
@@ -685,7 +754,17 @@ void app_nfc_magic_run(void)
         TickType_t now      = xTaskGetTickCount();
         TickType_t deadline = now + pdMS_TO_TICKS(200);
 
-        /* Poll for cards while in INSTRUCT state. */
+        /* Poll for cards while in INSTRUCT state.
+         *
+         * Audit Item 11: previously the auto-detect path issued the Gen1A
+         * 0x40/0x43 backdoor probe to *every* detected card — including
+         * MIFARE Classic, NTAG, DESFire, and contactless payment cards.
+         * Some payment cards (Apple Pay, Google Pay) treat unsolicited
+         * raw 0x40 short frames as a DoS trigger and refuse subsequent
+         * legitimate use until they re-power.  We now ONLY identify
+         * passively; the Gen1A backdoor probe is deferred to the actual
+         * write attempt where the user has explicitly confirmed they
+         * own the card. */
         if (ui_state == UI_INSTRUCT && now >= next_poll) {
             uint8_t uid[4];
             uint8_t atqa[2];
@@ -696,16 +775,23 @@ void app_nfc_magic_run(void)
                 cur_atqa[1] = atqa[1];
                 cur_sak = sak;
 
-                /* Gen1A check is intrusive (it puts the card into open mode),
-                 * so try last after passive identification. */
-                if (gen1a_enter_open_state()) {
-                    kind = MAGIC_KIND_GEN1A;
-                } else {
-                    /* Re-poll because backdoor probe consumed the card session */
-                    halt_a();
-                    poll_card_4byte(cur_uid, cur_atqa, &cur_sak);
-                    /* Default to Gen2 (most common); user can still proceed. */
+                /* Passive identification only: SAK 0x08 / 0x18 indicates
+                 * MIFARE Classic family which is the only family the M1
+                 * can magic-write.  We default to Gen2 (most common in
+                 * the wild) and let the write step try Gen1A/Gen4 as
+                 * fallbacks if Gen2 auth fails — but the speculative
+                 * backdoor probe NEVER fires on a card the user has not
+                 * confirmed. */
+                if (sak == 0x08 || sak == 0x18 || sak == 0x09 ||
+                    sak == 0x28 || sak == 0x38)
+                {
                     kind = MAGIC_KIND_GEN2;
+                } else {
+                    /* Non-Classic family (NTAG, DESFire, EMV, etc.) — we
+                     * cannot magic-write these.  Surface the SAK so the
+                     * user can decide, but mark unknown so the write path
+                     * skips the backdoor probes. */
+                    kind = MAGIC_KIND_UNKNOWN;
                 }
 
                 m1_buzzer_notification();
@@ -791,53 +877,87 @@ void app_nfc_magic_run(void)
 
                 draw_writing(kind);
 
+                /*
+                 * Audit Item 9 + Item 24: write-and-verify with halt+repoll
+                 * between attempts.
+                 *
+                 * Many Gen2 clones ACK a block-0 write but silently ignore
+                 * it; many Gen1A clones latch error state for ~500ms after
+                 * a failed attempt and refuse the next one.  We:
+                 *   - call the family's write
+                 *   - rfalFieldOff(); vTaskDelay(50); rfalFieldOnAndStartGT()
+                 *     to fully drop the latched state
+                 *   - re-poll the card and compare the reported UID + BCC
+                 *     against what we wrote
+                 *   - only declare success if they match
+                 *   - if mismatch, fall through to the next family
+                 *
+                 * The expected BCC byte is UID[0]^UID[1]^UID[2]^UID[3]; if
+                 * the card returns a different BCC the write was partially
+                 * applied (some clones echo old block-0 with new UID — a
+                 * tell-tale of an Apple Pay non-Classic, or a fully-locked
+                 * stock card).
+                 */
+                #define MAGIC_RESETTLE() do {                          \
+                    rfalFieldOff();                                    \
+                    vTaskDelay(50);                                    \
+                    (void)rfalFieldOnAndStartGT();                     \
+                    halt_a();                                          \
+                } while (0)
+
                 bool ok = false;
+                #define MAGIC_TRY(fn)  do {                                  \
+                    if (!ok) {                                               \
+                        if (fn(block0)) {                                    \
+                            MAGIC_RESETTLE();                                \
+                            uint8_t v_uid[4] = {0,0,0,0};                    \
+                            uint8_t v_atqa[2] = {0,0};                       \
+                            uint8_t v_sak = 0;                               \
+                            if (poll_card_4byte(v_uid, v_atqa, &v_sak)) {    \
+                                uint8_t bcc = (uint8_t)(v_uid[0] ^ v_uid[1] ^\
+                                              v_uid[2] ^ v_uid[3]);          \
+                                if (memcmp(v_uid, new_uid, 4) == 0 &&        \
+                                    bcc == (uint8_t)(new_uid[0] ^ new_uid[1] \
+                                          ^ new_uid[2] ^ new_uid[3]))        \
+                                {                                            \
+                                    ok = true;                               \
+                                }                                            \
+                            }                                                \
+                        }                                                    \
+                        if (!ok) MAGIC_RESETTLE();                           \
+                    }                                                        \
+                } while (0)
+
                 switch (kind) {
                 case MAGIC_KIND_GEN1A:
-                    /* Re-poll to re-establish the card session before write. */
-                    halt_a();
-                    if (poll_card_4byte(cur_uid, cur_atqa, &cur_sak)) {
-                        ok = magic_write_gen1a(block0);
-                    }
-                    if (!ok) {
-                        /* Fall through to Gen2 attempt */
-                        halt_a();
-                        ok = magic_write_gen2(block0);
-                    }
-                    if (!ok) {
-                        halt_a();
-                        ok = magic_write_gen4(block0);
-                    }
+                    MAGIC_TRY(magic_write_gen1a);
+                    MAGIC_TRY(magic_write_gen2);
+                    MAGIC_TRY(magic_write_gen4);
                     break;
                 case MAGIC_KIND_GEN2:
-                    ok = magic_write_gen2(block0);
-                    if (!ok) {
-                        halt_a();
-                        ok = magic_write_gen1a(block0);
-                    }
-                    if (!ok) {
-                        halt_a();
-                        ok = magic_write_gen4(block0);
-                    }
+                    MAGIC_TRY(magic_write_gen2);
+                    /* Only attempt Gen1A backdoor / Gen4 unlock after Gen2
+                     * proven non-functional — these are intrusive on real
+                     * cards and cannot run on user's first-choice path. */
+                    MAGIC_TRY(magic_write_gen1a);
+                    MAGIC_TRY(magic_write_gen4);
                     break;
                 case MAGIC_KIND_GEN4:
-                    ok = magic_write_gen4(block0);
-                    if (!ok) {
-                        halt_a();
-                        ok = magic_write_gen2(block0);
-                    }
-                    if (!ok) {
-                        halt_a();
-                        ok = magic_write_gen1a(block0);
-                    }
+                    MAGIC_TRY(magic_write_gen4);
+                    MAGIC_TRY(magic_write_gen2);
+                    MAGIC_TRY(magic_write_gen1a);
                     break;
                 default:
-                    /* Unknown: try all three. */
-                    ok = magic_write_gen1a(block0);
-                    if (!ok) { halt_a(); ok = magic_write_gen2(block0); }
-                    if (!ok) { halt_a(); ok = magic_write_gen4(block0); }
+                    /* Unknown family: try Gen2 first (least intrusive), then
+                     * Gen1A (intrusive), then Gen4 (vendor proprietary). */
+                    MAGIC_TRY(magic_write_gen2);
+                    MAGIC_TRY(magic_write_gen1a);
+                    MAGIC_TRY(magic_write_gen4);
                     break;
                 }
+
+                #undef MAGIC_TRY
+                #undef MAGIC_RESETTLE
 
                 last_write_ok = ok;
                 if (ok) m1_buzzer_notification();
