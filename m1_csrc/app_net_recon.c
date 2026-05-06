@@ -80,28 +80,42 @@ typedef struct {
 
 /***************************** V A R I A B L E S ******************************/
 
-/* Top-20 services to probe in port scan */
+/* Top-30 services to probe in port scan.  audit 07 / 04 — original list
+ * missed several modern IoT-default ports (5000 UPnP, 8000 / 8888 HTTP-alt,
+ * 631 IPP printers, 1883 / 8883 MQTT, 9100 raw print, 5353 mDNS, 1900 SSDP,
+ * 139 NetBIOS).  Order is roughly "likely-positive first" so an early hit
+ * shortens the worst case for an aborted scan. */
 static const nr_port_t s_nr_ports[] = {
-    {    21, "FTP"      },
+    {    80, "HTTP"     },
+    {   443, "HTTPS"    },
     {    22, "SSH"      },
     {    23, "Telnet"   },
-    {    25, "SMTP"     },
+    {    21, "FTP"      },
     {    53, "DNS"      },
-    {    80, "HTTP"     },
+    {    25, "SMTP"     },
     {   110, "POP3"     },
     {   143, "IMAP"     },
-    {   443, "HTTPS"    },
     {   445, "SMB"      },
-    {  1433, "MSSQL"    },
-    {  3306, "MySQL"    },
+    {   139, "NetBIOS"  },
     {  3389, "RDP"      },
-    {  5432, "Postgres" },
     {  5900, "VNC"      },
+    {  3306, "MySQL"    },
+    {  5432, "Postgres" },
+    {  1433, "MSSQL"    },
     {  6379, "Redis"    },
-    {  8080, "HTTP-Alt" },
-    {  8443, "HTTPS-Alt"},
-    {  9200, "Elastic"  },
     { 27017, "MongoDB"  },
+    {  9200, "Elastic"  },
+    {  8080, "HTTP-Alt" },
+    {  8000, "HTTP-Dev" },
+    {  8443, "HTTPS-Alt"},
+    {  8888, "HTTP-Adm" },
+    {  5000, "UPnP/Dev" },
+    {   631, "IPP/Print"},
+    {  9100, "RawPrint" },
+    {  1883, "MQTT"     },
+    {  8883, "MQTT-TLS" },
+    {  5353, "mDNS"     },
+    {  1900, "SSDP"     },
 };
 #define NR_PORT_COUNT ((uint8_t)(sizeof(s_nr_ports) / sizeof(s_nr_ports[0])))
 
