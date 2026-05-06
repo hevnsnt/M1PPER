@@ -13,6 +13,10 @@
 #ifndef M1_BUZZER_H_
 #define M1_BUZZER_H_
 
+/* Pull in M1_APP_BUZZER_USE_TIMER3 / TIMER8 defaults so callers don't have to
+ * remember to include m1_compile_cfg.h before this header. */
+#include "m1_compile_cfg.h"
+
 #ifdef M1_APP_BUZZER_USE_TIMER3
 
 #define BUZZER_TIMER				TIM3        /*!< Timer used for Audio encoding */
