@@ -55,6 +55,35 @@
 
 #define INPUT_PARAMS_MAX			5
 
+/* All mtest helpers receive a `pconsole` pointer that is the FreeRTOS+CLI
+ * output buffer, sized at compile time by `configCOMMAND_INT_MAX_OUTPUT_SIZE`.
+ * Helpers have historically used `PCONSOLE_RESET(pconsole,...)` and
+ * `sprintf(pconsole + strlen(pconsole), ...)` with no bound, which silently
+ * overflowed when the buffer was 200 bytes. This macro provides a single
+ * choke-point that:
+ *   1. snprintfs into the unused tail of the buffer
+ *   2. caps growth at PCONSOLE_SIZE-1 to leave room for the trailing NUL
+ *   3. is safe even if a previous write already overflowed
+ *
+ * NOTE: snprintf returns an int; we treat it as size_t after clamping. */
+#define PCONSOLE_SIZE	configCOMMAND_INT_MAX_OUTPUT_SIZE
+#define PCONSOLE_PRINTF(buf, ...) do {                                        \
+		size_t _used = strnlen((buf), PCONSOLE_SIZE);                         \
+		if (_used + 1 < PCONSOLE_SIZE) {                                      \
+			(void)snprintf((buf) + _used, PCONSOLE_SIZE - _used, __VA_ARGS__);\
+		}                                                                     \
+	} while (0)
+/* PCONSOLE_RESET: equivalent to sprintf(buf, ...) — start from the buffer
+ * head, replacing previous content. Used where the helper opens a fresh
+ * response. */
+#define PCONSOLE_RESET(buf, ...) do {                                         \
+		(void)snprintf((buf), PCONSOLE_SIZE, __VA_ARGS__);                    \
+	} while (0)
+/* PCONSOLE_PUTS: bounded equivalent of strcpy(buf, str). */
+#define PCONSOLE_PUTS(buf, str) do {                                          \
+		(void)snprintf((buf), PCONSOLE_SIZE, "%s", (str));                    \
+	} while (0)
+
 //************************** C O N S T A N T **********************************/
 
 const osThreadAttr_t cmdLineTask_attributes = {
@@ -113,7 +142,7 @@ BaseType_t cmd_m1_mtest(char *pconsole, size_t xWriteBufferLen, const char *pcCo
     // CLI tests should not run when there's an active running sub-function
 	if ( m1_device_stat.op_mode==M1_OPERATION_MODE_SUB_FUNC_RUNNING )
 	{
-		strcpy(pconsole, "Error: some task is being executed!\r\n");
+		PCONSOLE_PUTS(pconsole,"Error: some task is being executed!\r\n");
 		return pdFALSE;
 	} // if ( m1_device_stat.op_mode==M1_OPERATION_MODE_SUB_FUNC_RUNNING )
 
@@ -132,10 +161,35 @@ BaseType_t cmd_m1_mtest(char *pconsole, size_t xWriteBufferLen, const char *pcCo
 	                          /* Store the parameter string length. */
 	                          &input_params_len[i]
 	                        );
+		/* FreeRTOS_CLIGetParameter() returns NULL when no parameter exists at
+		 * the requested index. Without this guard the loop below would NULL-
+		 * deref or write through it (CVE-class). Truncate n_params so all
+		 * downstream code only sees real parameters. */
+		if ( input_params[i] == NULL )
+		{
+			n_params = i;
+			break;
+		}
 	} // for (i=0; i<n_params; i++)
 
 	for (i=0; i<n_params; i++)
-		input_params[i][input_params_len[i]] = 0x00; // Add NULL to the end of string
+	{
+		/* pcCommandString is declared const; the FreeRTOS+CLI parser
+		 * intentionally hands back internal pointers into the same buffer so
+		 * the caller can null-terminate each token in place. Guard against a
+		 * stale NULL just in case the loop above missed one. */
+		if ( input_params[i] != NULL )
+			input_params[i][input_params_len[i]] = 0x00;
+	}
+
+    /* Defensive: input_params[0] may be NULL if FreeRTOS_CLIGetParameter()
+     * couldn't find the first parameter (parser returned 0 tokens). Without
+     * this guard, strtol() on NULL would either segfault or return 0 silently. */
+    if ( n_params == 0 || input_params[0] == NULL )
+    {
+        cmd_m1_mtest_help();
+        return pdFALSE;
+    }
 
     // convert the string to a number
     cmd_type = strtol(input_params[0], NULL, 10);
@@ -250,7 +304,7 @@ void cmd_m1_mtest_basic_system(char *pconsole, char *input_params[], uint8_t n_p
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Buzzer - play\r\n");
     		if ( n_params < 3 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -264,7 +318,7 @@ void cmd_m1_mtest_basic_system(char *pconsole, char *input_params[], uint8_t n_p
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Set font\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		 // Impossible to change font dynamically!
@@ -275,7 +329,7 @@ void cmd_m1_mtest_basic_system(char *pconsole, char *input_params[], uint8_t n_p
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Write text\r\n");
     		if ( n_params < 3 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -287,7 +341,7 @@ void cmd_m1_mtest_basic_system(char *pconsole, char *input_params[], uint8_t n_p
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Clear display\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		u8g2_FirstPage(&m1_u8g2);
@@ -321,7 +375,7 @@ void cmd_m1_mtest_sdcard(char *pconsole, char *input_params[], uint8_t n_params,
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: SD card - create a new file\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		if ( m1_sdcard_init_retry() != SD_RET_OK )
@@ -334,9 +388,9 @@ void cmd_m1_mtest_sdcard(char *pconsole, char *input_params[], uint8_t n_params,
 
     		ret = m1_fb_open_new_file(&m1_cli_file, input_params[1]);
     		if ( ret )
-    			strcpy(pconsole, "Error!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error!\r\n");
     		else
-    			strcpy(pconsole, "File created successfully!\r\n");
+    			PCONSOLE_PUTS(pconsole,"File created successfully!\r\n");
     		break;
 
     	case 11:
@@ -347,16 +401,16 @@ void cmd_m1_mtest_sdcard(char *pconsole, char *input_params[], uint8_t n_params,
     		}
     		ret = m1_fb_close_file(&m1_cli_file);
     		if ( ret )
-    			strcpy(pconsole, "Error!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error!\r\n");
     		else
-    			strcpy(pconsole, "File closed successfully!\r\n");
+    			PCONSOLE_PUTS(pconsole,"File closed successfully!\r\n");
     		break;
 
     	case 12:
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: SD card - open a file\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		if ( m1_sdcard_init_retry() != SD_RET_OK )
@@ -365,16 +419,16 @@ void cmd_m1_mtest_sdcard(char *pconsole, char *input_params[], uint8_t n_params,
     		}
     		ret = m1_fb_open_file(&m1_cli_file, input_params[1]);
     		if ( ret )
-    			strcpy(pconsole, "Error!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error!\r\n");
     		else
-    			strcpy(pconsole, "File opened successfully!\r\n");
+    			PCONSOLE_PUTS(pconsole,"File opened successfully!\r\n");
     		break;
 
     	case 13:
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: SD card - write to a file\r\n");
     		if ( n_params < 3 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		if ( m1_sdcard_init_retry() != SD_RET_OK )
@@ -387,16 +441,16 @@ void cmd_m1_mtest_sdcard(char *pconsole, char *input_params[], uint8_t n_params,
     			size = FILE_READWRITE_LEN_MAX;
     		ret = m1_fb_write_to_file(&m1_cli_file, input_params[1], size);
     		if ( !ret )
-    			strcpy(pconsole, "Error!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error!\r\n");
     		else
-    			strcpy(pconsole, "Write to file successfully!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Write to file successfully!\r\n");
     		break;
 
     	case 14:
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: SD card - read from a file\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		if ( m1_sdcard_init_retry() != SD_RET_OK )
@@ -409,16 +463,16 @@ void cmd_m1_mtest_sdcard(char *pconsole, char *input_params[], uint8_t n_params,
     			size = FILE_READWRITE_LEN_MAX;
     		ret = m1_fb_read_from_file(&m1_cli_file, buffer, size);
     		if ( !ret )
-    			strcpy(pconsole, "Error!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error!\r\n");
     		else
-    			strcpy(pconsole, buffer);
+    			PCONSOLE_PUTS(pconsole,buffer);
     		break;
 
     	case 17:
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: SD card - delete a file or directory\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		if ( m1_sdcard_init_retry() != SD_RET_OK )
@@ -427,28 +481,28 @@ void cmd_m1_mtest_sdcard(char *pconsole, char *input_params[], uint8_t n_params,
     		}
     		ret = m1_fb_delete_file(input_params[1]);
     		if ( ret )
-    			strcpy(pconsole, "Error!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error!\r\n");
     		else
-    			strcpy(pconsole, "File deleted successfully!\r\n");
+    			PCONSOLE_PUTS(pconsole,"File deleted successfully!\r\n");
     		break;
 
     	case 18:
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: SD card - Format a drive\r\n");
     		if ( !m1_sd_detected() )
     		{
-    			strcpy(pconsole, "Card not detected!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Card not detected!\r\n");
     			break;
     		}
     		m1_sdcard_format();
     		if ( m1_sdcard_get_status()==SD_access_OK )
-    			strcpy(pconsole, "Format successfully!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Format successfully!\r\n");
     		break;
 
     	case 19:
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: SD card - list all files and folders\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		if ( m1_sdcard_init_retry() != SD_RET_OK )
@@ -457,7 +511,7 @@ void cmd_m1_mtest_sdcard(char *pconsole, char *input_params[], uint8_t n_params,
     		}
     		FRESULT fres = m1_fb_listing(input_params[1]);
     		if ( fres!=FR_OK )
-    			strcpy(pconsole, "Error!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error!\r\n");
     		break;
 
     	default:
@@ -482,7 +536,7 @@ void cmd_m1_mtest_led(char *pconsole, char *input_params[], uint8_t n_params, ui
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: LED - fast blink mode with RGB\r\n");
     		if ( n_params < 4 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -501,7 +555,7 @@ void cmd_m1_mtest_led(char *pconsole, char *input_params[], uint8_t n_params, ui
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: LED - direct mode with R\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -513,7 +567,7 @@ void cmd_m1_mtest_led(char *pconsole, char *input_params[], uint8_t n_params, ui
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: LED - direct mode with G\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -525,7 +579,7 @@ void cmd_m1_mtest_led(char *pconsole, char *input_params[], uint8_t n_params, ui
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: LED - direct mode with B\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -556,7 +610,7 @@ void cmd_m1_mtest_lcd(char *pconsole, char *input_params[], uint8_t n_params, ui
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: LCD - set backlight\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -568,7 +622,7 @@ void cmd_m1_mtest_lcd(char *pconsole, char *input_params[], uint8_t n_params, ui
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: LCD - set power save\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -585,7 +639,7 @@ void cmd_m1_mtest_lcd(char *pconsole, char *input_params[], uint8_t n_params, ui
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: LCD - set contrast\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -597,7 +651,7 @@ void cmd_m1_mtest_lcd(char *pconsole, char *input_params[], uint8_t n_params, ui
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: LCD - set regulation ratio\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -640,7 +694,7 @@ void cmd_m1_mtest_infrared(char *pconsole, char *input_params[], uint8_t n_param
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Infrared - transmit\r\n");
     		if ( n_params < 5 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -696,7 +750,7 @@ void cmd_m1_mtest_infrared(char *pconsole, char *input_params[], uint8_t n_param
     				} // if ( q_item.q_evt_type==Q_EVENT_IRRED_TX || force_quit )
     			} // if (ret==pdTRUE || force_quit)
     		} // while (1 )
-    		strcpy(pconsole, "Transmit completed!\r\n");
+    		PCONSOLE_PUTS(pconsole,"Transmit completed!\r\n");
     		break;
 
     	default:
@@ -814,7 +868,7 @@ void cmd_m1_mtest_subghz(char *pconsole, char *input_params[], uint8_t n_params,
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Sub-GHz - init\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -859,7 +913,7 @@ void cmd_m1_mtest_subghz(char *pconsole, char *input_params[], uint8_t n_params,
     		SI446x_Change_State(SI446X_CMD_CHANGE_STATE_ARG_NEXT_STATE1_NEW_STATE_ENUM_SLEEP);
     		radio_set_antenna_mode(RADIO_ANTENNA_MODE_ISOLATED);
     		struct si446x_reply_PART_INFO_map *pinfo = SI446x_PartInfo();
-    		sprintf(pconsole, "Init OK.\r\nPart %d Rev. %d Rom ID %d\r\n", pinfo->PART, pinfo->CHIPREV, pinfo->ROMID);
+    		PCONSOLE_RESET(pconsole,"Init OK.\r\nPart %d Rev. %d Rom ID %d\r\n", pinfo->PART, pinfo->CHIPREV, pinfo->ROMID);
     		break;
 
     	case 61:
@@ -867,7 +921,7 @@ void cmd_m1_mtest_subghz(char *pconsole, char *input_params[], uint8_t n_params,
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Sub-GHz - transmit in CW mode\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -880,7 +934,7 @@ void cmd_m1_mtest_subghz(char *pconsole, char *input_params[], uint8_t n_params,
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Sub-GHz - set transmit power\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -893,7 +947,7 @@ void cmd_m1_mtest_subghz(char *pconsole, char *input_params[], uint8_t n_params,
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Sub-GHz - receive mode\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -907,7 +961,7 @@ void cmd_m1_mtest_subghz(char *pconsole, char *input_params[], uint8_t n_params,
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: Sub-GHz - select frontend network\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -956,7 +1010,7 @@ void cmd_m1_mtest_esp32(char *pconsole, char *input_params[], uint8_t n_params, 
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: ESP32 - init esp32 module\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		//size_t free_heap = xPortGetFreeHeapSize();
@@ -970,7 +1024,7 @@ void cmd_m1_mtest_esp32(char *pconsole, char *input_params[], uint8_t n_params, 
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: ESP32 - get access point list\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		if ( m1_esp32_get_init_status() )
@@ -980,11 +1034,11 @@ void cmd_m1_mtest_esp32(char *pconsole, char *input_params[], uint8_t n_params, 
     			if ( get_esp32_ready_status() )
     				test_get_available_wifi();
     			else
-    				strcpy(pconsole, "ESP32 not ready!\r\n");
+    				PCONSOLE_PUTS(pconsole,"ESP32 not ready!\r\n");
     		} // if ( m1_esp32_get_init_status() )
     		else
     		{
-    			strcpy(pconsole, "ESP32 not init!\r\n");
+    			PCONSOLE_PUTS(pconsole,"ESP32 not init!\r\n");
     		}
     		break;
 
@@ -992,7 +1046,7 @@ void cmd_m1_mtest_esp32(char *pconsole, char *input_params[], uint8_t n_params, 
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: ESP32 - send AT command\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		if ( m1_esp32_get_init_status() )
@@ -1016,7 +1070,7 @@ void cmd_m1_mtest_esp32(char *pconsole, char *input_params[], uint8_t n_params, 
     		} // if ( m1_esp32_get_init_status() )
     		else
     		{
-    			strcpy(pconsole, "ESP32 not init!\r\n");
+    			PCONSOLE_PUTS(pconsole,"ESP32 not init!\r\n");
     		}
     		break;
 
@@ -1024,7 +1078,7 @@ void cmd_m1_mtest_esp32(char *pconsole, char *input_params[], uint8_t n_params, 
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: ESP32 - reset\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		esp32_disable();
@@ -1036,7 +1090,7 @@ void cmd_m1_mtest_esp32(char *pconsole, char *input_params[], uint8_t n_params, 
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: ESP32 - deinit for flash update\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		m1_esp32_deinit();
@@ -1068,7 +1122,7 @@ void cmd_m1_mtest_gpio(char *pconsole, char *input_params[], uint8_t n_params, u
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: GPIO - turn external 3V3 on/off\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -1080,7 +1134,7 @@ void cmd_m1_mtest_gpio(char *pconsole, char *input_params[], uint8_t n_params, u
     		M1_LOG_N(M1_LOGDB_TAG, "CLI mtest: GPIO - turn external 5V on/off\r\n");
     		if ( n_params < 2 )
     		{
-    			strcpy(pconsole, "Error: missing parameter(s)!\r\n");
+    			PCONSOLE_PUTS(pconsole,"Error: missing parameter(s)!\r\n");
     			break;
     		}
     		// convert the string to a number
@@ -1122,22 +1176,22 @@ void cmd_m1_mtest_nfc(char *pconsole, char *input_params[], uint8_t n_params, ui
 				// Validate duration
 				if (input1_val < 1000) {
 					M1_LOG_W("NFC", "%lu ms may not be enough for proper testing", input1_val);
-					sprintf(pconsole, "Warning: %lu ms may not be enough for proper testing\r\n", input1_val);
-					sprintf(pconsole + strlen(pconsole), "Consider using at least 5000 ms (5 seconds)\r\n");
+					PCONSOLE_RESET(pconsole,"Warning: %lu ms may not be enough for proper testing\r\n", input1_val);
+					PCONSOLE_PRINTF(pconsole,"Consider using at least 5000 ms (5 seconds)\r\n");
 				}
 				
 				if (input1_val > 120000) {
 					M1_LOG_W("NFC", "%lu ms (2 minutes) may cause overheating", input1_val);
-					sprintf(pconsole, "Warning: %lu ms (2 minutes) may cause overheating\r\n", input1_val);
-					sprintf(pconsole + strlen(pconsole), "Consider shorter tests or active cooling\r\n");
+					PCONSOLE_RESET(pconsole,"Warning: %lu ms (2 minutes) may cause overheating\r\n", input1_val);
+					PCONSOLE_PRINTF(pconsole,"Consider shorter tests or active cooling\r\n");
 				}
 				
 				// For long durations, use non-blocking version
 				if (input1_val > 5000) {
 					M1_LOG_I("NFC", "Starting non-blocking carrier for %lu ms", input1_val);
 					if (nfc_start_carrier_nonblocking(input1_val)) {
-						sprintf(pconsole, "✅ Started %lu ms carrier (non-blocking)\r\n", input1_val);
-						sprintf(pconsole + strlen(pconsole), "Device remains responsive during test\r\n");
+						PCONSOLE_RESET(pconsole,"✅ Started %lu ms carrier (non-blocking)\r\n", input1_val);
+						PCONSOLE_PRINTF(pconsole,"Device remains responsive during test\r\n");
 						
 						// Show estimated completion
 						uint32_t seconds = input1_val / 1000;
@@ -1145,44 +1199,44 @@ void cmd_m1_mtest_nfc(char *pconsole, char *input_params[], uint8_t n_params, ui
 						seconds %= 60;
 						
 						if (minutes > 0) {
-							sprintf(pconsole + strlen(pconsole), "Estimated completion: %lu min %lu sec\r\n", 
+							PCONSOLE_PRINTF(pconsole,"Estimated completion: %lu min %lu sec\r\n", 
 								minutes, seconds);
 						} else {
-							sprintf(pconsole + strlen(pconsole), "Estimated completion: %lu seconds\r\n", 
+							PCONSOLE_PRINTF(pconsole,"Estimated completion: %lu seconds\r\n", 
 								seconds);
 						}
 						
-						sprintf(pconsole + strlen(pconsole), "Use 'mtest 92' to stop early\r\n");
+						PCONSOLE_PRINTF(pconsole,"Use 'mtest 92' to stop early\r\n");
 					} else {
-						sprintf(pconsole, "❌ Failed to start non-blocking carrier\r\n");
-						sprintf(pconsole + strlen(pconsole), "Falling back to blocking mode...\r\n");
+						PCONSOLE_RESET(pconsole,"❌ Failed to start non-blocking carrier\r\n");
+						PCONSOLE_PRINTF(pconsole,"Falling back to blocking mode...\r\n");
 						
 						// Fall back to blocking mode
 						if (test_nfc_continuous_carrier(input1_val)) {
-							sprintf(pconsole + strlen(pconsole), "NFC carrier transmitted for %lu ms\r\n", input1_val);
+							PCONSOLE_PRINTF(pconsole,"NFC carrier transmitted for %lu ms\r\n", input1_val);
 						} else {
-							sprintf(pconsole + strlen(pconsole), "Failed to transmit NFC carrier\r\n");
+							PCONSOLE_PRINTF(pconsole,"Failed to transmit NFC carrier\r\n");
 						}
 					}
 				} else {
 					// For short durations, use blocking version
 					M1_LOG_I("NFC", "Testing continuous carrier for %lu ms", input1_val);
 					if (test_nfc_continuous_carrier(input1_val)) {
-						sprintf(pconsole, "NFC carrier transmitted for %lu ms\r\n", input1_val);
+						PCONSOLE_RESET(pconsole,"NFC carrier transmitted for %lu ms\r\n", input1_val);
 					} else {
-						sprintf(pconsole, "Failed to transmit NFC carrier\r\n");
+						PCONSOLE_RESET(pconsole,"Failed to transmit NFC carrier\r\n");
 					}
 				}
 			} else {
-				sprintf(pconsole, "Enhanced NFC Carrier Test\r\n");
-				sprintf(pconsole + strlen(pconsole), "Usage: mtest 91 <duration_ms>\r\n");
-				sprintf(pconsole + strlen(pconsole), "  duration_ms: 1000-120000 (1-120 seconds)\r\n");
-				sprintf(pconsole + strlen(pconsole), "Examples:\r\n");
-				sprintf(pconsole + strlen(pconsole), "  mtest 91 5000    (5 seconds)\r\n");
-				sprintf(pconsole + strlen(pconsole), "  mtest 91 30000   (30 seconds)\r\n");
-				sprintf(pconsole + strlen(pconsole), "  mtest 91 60000   (60 seconds)\r\n");
-				sprintf(pconsole + strlen(pconsole), "  mtest 91 120000  (120 seconds)\r\n");
-				sprintf(pconsole + strlen(pconsole), "\rNote: >5000ms uses non-blocking mode (device stays responsive)\r\n");
+				PCONSOLE_RESET(pconsole,"Enhanced NFC Carrier Test\r\n");
+				PCONSOLE_PRINTF(pconsole,"Usage: mtest 91 <duration_ms>\r\n");
+				PCONSOLE_PRINTF(pconsole,"  duration_ms: 1000-120000 (1-120 seconds)\r\n");
+				PCONSOLE_PRINTF(pconsole,"Examples:\r\n");
+				PCONSOLE_PRINTF(pconsole,"  mtest 91 5000    (5 seconds)\r\n");
+				PCONSOLE_PRINTF(pconsole,"  mtest 91 30000   (30 seconds)\r\n");
+				PCONSOLE_PRINTF(pconsole,"  mtest 91 60000   (60 seconds)\r\n");
+				PCONSOLE_PRINTF(pconsole,"  mtest 91 120000  (120 seconds)\r\n");
+				PCONSOLE_PRINTF(pconsole,"\rNote: >5000ms uses non-blocking mode (device stays responsive)\r\n");
 			}
 			break;
 		
@@ -1190,13 +1244,13 @@ void cmd_m1_mtest_nfc(char *pconsole, char *input_params[], uint8_t n_params, ui
 			M1_LOG_I("NFC", "Stopping NFC carrier");
 			if (nfc_is_carrier_active()) {
 				nfc_stop_carrier();
-				sprintf(pconsole, "NFC carrier stopped (was running in non-blocking mode)\r\n");
+				PCONSOLE_RESET(pconsole,"NFC carrier stopped (was running in non-blocking mode)\r\n");
 			} else {
 				// Try the old method
 				if (test_nfc_stop_continuous_carrier()) {
-					sprintf(pconsole, "NFC carrier stopped\r\n");
+					PCONSOLE_RESET(pconsole,"NFC carrier stopped\r\n");
 				} else {
-					sprintf(pconsole, "No active carrier to stop\r\n");
+					PCONSOLE_RESET(pconsole,"No active carrier to stop\r\n");
 				}
 			}
 			break;
@@ -1208,13 +1262,13 @@ void cmd_m1_mtest_nfc(char *pconsole, char *input_params[], uint8_t n_params, ui
 				
 				/* Test boosted read */
 				if (test_nfc_boosted_read(input1_val)) {
-					sprintf(pconsole, "Boosted read successful with %lu ms carrier\r\n", input1_val);
+					PCONSOLE_RESET(pconsole,"Boosted read successful with %lu ms carrier\r\n", input1_val);
 				} else {
-					sprintf(pconsole, "Boosted read test completed (check logs)\r\n");
+					PCONSOLE_RESET(pconsole,"Boosted read test completed (check logs)\r\n");
 				}
 			} else {
-				sprintf(pconsole, "Usage: mtest 93 <boost_duration_ms>\r\n");
-				sprintf(pconsole + strlen(pconsole), "Example: mtest 93 100 (100ms boost)\r\n");
+				PCONSOLE_RESET(pconsole,"Usage: mtest 93 <boost_duration_ms>\r\n");
+				PCONSOLE_PRINTF(pconsole,"Example: mtest 93 100 (100ms boost)\r\n");
 			}
 			break;
 		
@@ -1222,30 +1276,30 @@ void cmd_m1_mtest_nfc(char *pconsole, char *input_params[], uint8_t n_params, ui
 			{
 				nfc_scan_result_t result;
 				if (nfc_adaptive_scan(&result)) {
-					sprintf(pconsole, "Tag detected!\r\n");
-					sprintf(pconsole + strlen(pconsole), "Distance: %.1f cm\r\n", 
+					PCONSOLE_RESET(pconsole,"Tag detected!\r\n");
+					PCONSOLE_PRINTF(pconsole,"Distance: %.1f cm\r\n", 
 							result.estimated_distance_cm);
-					sprintf(pconsole + strlen(pconsole), "RSSI: %d dBm\r\n", result.rssi);
-					sprintf(pconsole + strlen(pconsole), "Read time: %lu ms\r\n", 
+					PCONSOLE_PRINTF(pconsole,"RSSI: %d dBm\r\n", result.rssi);
+					PCONSOLE_PRINTF(pconsole,"Read time: %lu ms\r\n", 
 							result.read_time_ms);
-					sprintf(pconsole + strlen(pconsole), "Boost used: %lu ms\r\n", 
+					PCONSOLE_PRINTF(pconsole,"Boost used: %lu ms\r\n", 
 							result.boost_duration_ms);
-					sprintf(pconsole + strlen(pconsole), "Attempts: %d\r\n", 
+					PCONSOLE_PRINTF(pconsole,"Attempts: %d\r\n", 
 							result.scan_attempts);
 				} else {
-					sprintf(pconsole, "No tag detected\r\n");
+					PCONSOLE_RESET(pconsole,"No tag detected\r\n");
 				}
 			}
 			break;
 			
 		case 95: /* Test boost configurations */
 			nfc_test_boost_configurations();
-			sprintf(pconsole, "Boost configuration test started (check logs)\r\n");
+			PCONSOLE_RESET(pconsole,"Boost configuration test started (check logs)\r\n");
 			break;
 			
 		case 96: /* Test pulsed carrier */
 			nfc_test_pulsed_carrier();
-			sprintf(pconsole, "Pulsed carrier test started (check logs)\r\n");
+			PCONSOLE_RESET(pconsole,"Pulsed carrier test started (check logs)\r\n");
 			break;
 			
 		case 97: /* NEW: Pulsed carrier patterns (non-blocking) */
@@ -1256,34 +1310,34 @@ void cmd_m1_mtest_nfc(char *pconsole, char *input_params[], uint8_t n_params, ui
 				
 				// Validate parameters
 				if (input1_val == 0 || input2_val == 0 || input3_val == 0) {
-					sprintf(pconsole, "Error: Parameters must be > 0\r\n");
-					sprintf(pconsole + strlen(pconsole), "Usage: mtest 97 <on_ms> <off_ms> <cycles>\r\n");
+					PCONSOLE_RESET(pconsole,"Error: Parameters must be > 0\r\n");
+					PCONSOLE_PRINTF(pconsole,"Usage: mtest 97 <on_ms> <off_ms> <cycles>\r\n");
 					break;
 				}
 				
 				uint32_t total_time = (input1_val + input2_val) * input3_val;
 				
-				sprintf(pconsole, "Starting pulsed carrier pattern:\r\n");
-				sprintf(pconsole + strlen(pconsole), "  ON: %lu ms, OFF: %lu ms\r\n", input1_val, input2_val);
-				sprintf(pconsole + strlen(pconsole), "  Cycles: %lu\r\n", input3_val);
-				sprintf(pconsole + strlen(pconsole), "  Total time: %lu ms (~%.1f seconds)\r\n", 
+				PCONSOLE_RESET(pconsole,"Starting pulsed carrier pattern:\r\n");
+				PCONSOLE_PRINTF(pconsole,"  ON: %lu ms, OFF: %lu ms\r\n", input1_val, input2_val);
+				PCONSOLE_PRINTF(pconsole,"  Cycles: %lu\r\n", input3_val);
+				PCONSOLE_PRINTF(pconsole,"  Total time: %lu ms (~%.1f seconds)\r\n", 
 						total_time, total_time / 1000.0);
 				
 				if (nfc_start_pulsed_carrier(input1_val, input2_val, input3_val)) {
-					sprintf(pconsole + strlen(pconsole), "✅ Pattern started (non-blocking)\r\n");
-					sprintf(pconsole + strlen(pconsole), "Device remains responsive\r\n");
-					sprintf(pconsole + strlen(pconsole), "Use 'mtest 92' to stop early\r\n");
+					PCONSOLE_PRINTF(pconsole,"✅ Pattern started (non-blocking)\r\n");
+					PCONSOLE_PRINTF(pconsole,"Device remains responsive\r\n");
+					PCONSOLE_PRINTF(pconsole,"Use 'mtest 92' to stop early\r\n");
 				} else {
-					sprintf(pconsole + strlen(pconsole), "❌ Failed to start pattern\r\n");
+					PCONSOLE_PRINTF(pconsole,"❌ Failed to start pattern\r\n");
 				}
 			} else {
-				sprintf(pconsole, "NFC Pulsed Carrier Patterns\r\n");
-				sprintf(pconsole + strlen(pconsole), "Usage: mtest 97 <on_ms> <off_ms> <cycles>\r\n");
-				sprintf(pconsole + strlen(pconsole), "Examples:\r\n");
-				sprintf(pconsole + strlen(pconsole), "  mtest 97 500 500 10   (10s total)\r\n");
-				sprintf(pconsole + strlen(pconsole), "  mtest 97 1000 500 20  (30s total)\r\n");
-				sprintf(pconsole + strlen(pconsole), "  mtest 97 2000 1000 5  (15s total)\r\n");
-				sprintf(pconsole + strlen(pconsole), "\rNote: Uses non-blocking implementation\r\n");
+				PCONSOLE_RESET(pconsole,"NFC Pulsed Carrier Patterns\r\n");
+				PCONSOLE_PRINTF(pconsole,"Usage: mtest 97 <on_ms> <off_ms> <cycles>\r\n");
+				PCONSOLE_PRINTF(pconsole,"Examples:\r\n");
+				PCONSOLE_PRINTF(pconsole,"  mtest 97 500 500 10   (10s total)\r\n");
+				PCONSOLE_PRINTF(pconsole,"  mtest 97 1000 500 20  (30s total)\r\n");
+				PCONSOLE_PRINTF(pconsole,"  mtest 97 2000 1000 5  (15s total)\r\n");
+				PCONSOLE_PRINTF(pconsole,"\rNote: Uses non-blocking implementation\r\n");
 			}
 			break;
 			
@@ -1291,8 +1345,8 @@ void cmd_m1_mtest_nfc(char *pconsole, char *input_params[], uint8_t n_params, ui
 			{
 				int16_t rssi = nfc_get_rssi();
 				float distance = nfc_estimate_distance_from_rssi(rssi);
-				sprintf(pconsole, "RSSI: %d dBm\r\n", rssi);
-				sprintf(pconsole + strlen(pconsole), "Estimated distance: %.1f cm\r\n", distance);
+				PCONSOLE_RESET(pconsole,"RSSI: %d dBm\r\n", rssi);
+				PCONSOLE_PRINTF(pconsole,"Estimated distance: %.1f cm\r\n", distance);
 			}
 			break;
 			
@@ -1300,16 +1354,16 @@ void cmd_m1_mtest_nfc(char *pconsole, char *input_params[], uint8_t n_params, ui
 
 		case 101: /* NEW: Check carrier status */
 			if (nfc_is_carrier_active()) {
-				sprintf(pconsole, "NFC carrier: ACTIVE\r\n");
-				sprintf(pconsole + strlen(pconsole), "Use 'mtest 92' to stop\r\n");
+				PCONSOLE_RESET(pconsole,"NFC carrier: ACTIVE\r\n");
+				PCONSOLE_PRINTF(pconsole,"Use 'mtest 92' to stop\r\n");
 			} else {
-				sprintf(pconsole, "NFC carrier: INACTIVE\r\n");
-				sprintf(pconsole + strlen(pconsole), "No carrier transmission in progress\r\n");
+				PCONSOLE_RESET(pconsole,"NFC carrier: INACTIVE\r\n");
+				PCONSOLE_PRINTF(pconsole,"No carrier transmission in progress\r\n");
 			}
 			break;
 
 			nfc_optimize_receiver();
-			sprintf(pconsole, "Receiver optimized for weak signals\r\n");
+			PCONSOLE_RESET(pconsole,"Receiver optimized for weak signals\r\n");
 			break;
 
     	default:

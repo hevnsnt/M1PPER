@@ -179,7 +179,10 @@ header file. */
 // vApplicationMallocFailedHook() will be called if the following is defined
 #define configUSE_MALLOC_FAILED_HOOK		1
 
-#define configCOMMAND_INT_MAX_OUTPUT_SIZE 200
+/* Output buffer for FreeRTOS+CLI command responses.
+ * Bumped from 200 -> 512 to give mtest helpers enough room for multi-line
+ * status text. m1_cli.c uses snprintf with this size to bound writes. */
+#define configCOMMAND_INT_MAX_OUTPUT_SIZE 512
 
 #if defined(__ICCARM__) || defined(__CC_ARM) || defined(__GNUC__)
 void PreSleepProcessing(uint32_t ulExpectedIdleTime);

@@ -322,6 +322,11 @@ void m1_logdb_init(void)
 	}
 #endif // #ifdef M1_DEBUG_CLI_ENABLE
 
+	/* mutex_log_write_trans was used by the prior blocking _write path.  The
+	 * new implementation does not use it (taskENTER_CRITICAL / FromISR APIs
+	 * provide the necessary exclusion).  Kept allocated for callers that may
+	 * read mutex_log_write_trans externally; cheap (16 bytes) and avoids ABI
+	 * churn. */
 	mutex_log_write_trans = xSemaphoreCreateMutex();
 	assert(mutex_log_write_trans);
 
@@ -500,10 +505,27 @@ int __io_putchar (int ch)
 int _write(int file, char *data, int len)
 {
 	uint8_t q_item;
+	BaseType_t in_isr;
 
 	UNUSED(file);
 
-	xSemaphoreTake(mutex_log_write_trans, portMAX_DELAY);
+	/* The hot log path may be reached either from a normal task context (most
+	 * callers) or from a corner case where a critical section / mid-priority
+	 * caller invokes a logging macro.  We never take a blocking semaphore
+	 * here:
+	 *   - Task context: brief critical section guarantees mutual exclusion
+	 *     against other tasks at lower or equal SVC priority.
+	 *   - From-ISR context: skip the critical section (already exclusive vs
+	 *     tasks; competing ISRs are gated by NVIC priority) and use the
+	 *     FromISR queue API.
+	 * This eliminates the prior libc-malloc/mutex deadlock vector flagged in
+	 * audit 01 (m1_log_debug.c:643). */
+	in_isr = (xPortIsInsideInterrupt() != pdFALSE) ? pdTRUE : pdFALSE;
+
+	if (in_isr == pdFALSE)
+	{
+		taskENTER_CRITICAL();
+	}
 
     /* If RPC CLI capture is active, also copy to capture buffer */
     if (s_capture_buf != NULL && s_capture_len < s_capture_size)
@@ -516,9 +538,20 @@ int _write(int file, char *data, int len)
     }
 
     len = m1_ringbuffer_write(plogdb_tx_rb, data, len);
-    xQueueSend(log_q_hdl, &q_item, 0);
 
-    xSemaphoreGive(mutex_log_write_trans);
+    if (in_isr == pdFALSE)
+    {
+        taskEXIT_CRITICAL();
+        if (log_q_hdl != NULL)
+            xQueueSend(log_q_hdl, &q_item, 0);
+    }
+    else
+    {
+        BaseType_t wake = pdFALSE;
+        if (log_q_hdl != NULL)
+            xQueueSendFromISR(log_q_hdl, &q_item, &wake);
+        portYIELD_FROM_ISR(wake);
+    }
 
     return len;
 } // int _write(int file, char *data, int len)
@@ -607,13 +640,27 @@ void m1_logdb_write(const char* data)
 /*============================================================================*/
 /*
  * This function writes a formatted debug/log message to the debug/log output
+ *
+ * No-malloc path:
+ *   The original implementation called libc malloc()/free() per log line, which
+ *   competed with FreeRTOS heap_4 for the same RAM region and could deadlock
+ *   from ISR contexts via the newlib __malloc_lock mutex (see audit 01-embedded
+ *   item m1_log_debug.c:643).  We now build the formatted string entirely on a
+ *   per-call stack buffer.  M1_LOGDB_FMT_STACK_BYTES = 192 fits every log line
+ *   in the codebase (longest seen ~110 bytes including the prefix) without
+ *   tipping any caller's stack.  Lines longer than the buffer are truncated
+ *   in place by vsnprintf and a "..\n" tail is appended so truncation is
+ *   visible.
  */
 /*============================================================================*/
+#define M1_LOGDB_FMT_STACK_BYTES   192U   /* see comment above; tune iff caller stacks shrink */
+
 void m1_logdb_printf(S_M1_LogDebugLevel_t level, const char* tag, const char* format, ...)
 {
-	char *db_string;
-	char *log_choice = " ";
+	char db_string[M1_LOGDB_FMT_STACK_BYTES];
+	const char *log_choice = " ";
 	va_list pargs;
+	int n;
 
 	if (level > m1_logdb.log_level)
 		return;
@@ -640,27 +687,30 @@ void m1_logdb_printf(S_M1_LogDebugLevel_t level, const char* tag, const char* fo
     		break;
     } // switch(level)
 
-    db_string = (char *)malloc(M1_LOGDB_MESSAGE_SIZE);
-    if ( db_string==NULL )
-    {
-    	return; // Do nothing if memory allocation fails
-    }
-
     if  (*log_choice != 'R')
     {
-    	sprintf(db_string, " %lu [%s][%s] ", HAL_GetTick(), log_choice, tag);
-    	m1_logdb_write(db_string);
+        n = snprintf(db_string, sizeof(db_string), " %lu [%s][%s] ",
+                     (unsigned long)HAL_GetTick(), log_choice, tag);
+        if (n > 0)
+            m1_logdb_write(db_string);
     }
 
     va_start(pargs, format);
-    m1_logdb_dyn_vsprintf(format, pargs, &db_string);
+    n = vsnprintf(db_string, sizeof(db_string), format, pargs);
     va_end(pargs);
 
-    if ( db_string!=NULL )
+    if (n < 0)
+        return;
+    if ((size_t)n >= sizeof(db_string))
     {
-        m1_logdb_write(db_string);
-        free(db_string);
-    } // if ( db_string!=NULL )
+        /* Truncated.  Append a marker that fits in the trailing 4 bytes so
+         * downstream readers can see the line was clipped. */
+        db_string[sizeof(db_string) - 4] = '.';
+        db_string[sizeof(db_string) - 3] = '.';
+        db_string[sizeof(db_string) - 2] = '\n';
+        db_string[sizeof(db_string) - 1] = '\0';
+    }
+    m1_logdb_write(db_string);
 
     //m1_logdb_write("\r\n");
 
@@ -670,41 +720,16 @@ void m1_logdb_printf(S_M1_LogDebugLevel_t level, const char* tag, const char* fo
 
 /*============================================================================*/
 /*
- * This function copy the log/debug message to the buffer.
- * The buffer size will be dynamically adjusted.
- * Its purpose is replace the standard function vsprintf().
+ * Stack-only formatter retained as no-op stub for the .h prototype linkers.
+ * The malloc/realloc loop the original m1_logdb_dyn_vsprintf implemented is
+ * gone; m1_logdb_printf now formats directly on its caller stack.  Kept here
+ * (static) so the file compiles cleanly without the old prototype.
  *
   */
 /*============================================================================*/
 static void m1_logdb_dyn_vsprintf(const char *format, va_list pargs, char **pstring)
 {
-	int ret_n;
-	uint8_t mem_size;
-	va_list pargsc;
-
-	mem_size = M1_LOGDB_MESSAGE_SIZE; // Set the default size first
-	while (1)
-	{
-		va_copy(pargsc, pargs); // Make a copy of the argument list
-		ret_n = vsnprintf(*pstring, mem_size, format, pargsc); // Try it
-		if ( ret_n > -1 ) // Good try?
-		{
-			if (ret_n < mem_size) // Good size?
-				break; // Exit loop and return
-			else
-				mem_size = ret_n + 20; // Adjust the allocated space
-		} // if ( ret_n > -1 )
-		else
-			mem_size = UCHAR_MAX; // Exit condition
-
-		free(*pstring); // Free allocated memory slot
-		*pstring = NULL; // Caller function may check NULL for error condition
-		if ( mem_size > 2*M1_LOGDB_MESSAGE_SIZE ) // Memory size exceeds the maximum allowed size?
-			break; // Exit
-		*pstring = (char *)malloc(mem_size);
-	    if ( *pstring==NULL )
-	    {
-	    	break; // Do nothing if memory allocation fails
-	    }
-	} // while (1)
-} // static void m1_logdb_dyn_vsprintf(const char *format, va_list pargs, char **pstring)
+    (void)format;
+    (void)pargs;
+    (void)pstring;
+}

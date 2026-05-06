@@ -99,7 +99,13 @@ void vCommandConsoleTask(void *pvParameters)
                                   portMAX_DELAY); // Wait indefinitely
         //echo recevied char
         cRxedChar = receivedValue & 0xFF;
-        cliWrite((char *)&cRxedChar);
+        /* cliWrite() forwards to printf("%s", ...) so the input MUST be a
+         * null-terminated string, not a single char. Stack-allocate a 2-byte
+         * buffer to avoid reading past cRxedChar into adjacent memory. */
+        {
+            char echo_buf[2] = { (char)cRxedChar, '\0' };
+            cliWrite(echo_buf);
+        }
         if (cRxedChar == '\r' || cRxedChar == '\n')
         {
             // user pressed enter, process the command
@@ -255,10 +261,15 @@ void handleCharacterInput(uint8_t *cInputIndex, char *pcInputString)
     }
     else
     {
-        if (*cInputIndex < MAX_INPUT_LENGTH)
+        /* Reserve last byte for NUL terminator. The handleNewline path
+         * memsets the buffer after each command, but during line-edit the
+         * buffer must remain a valid C-string for any code that calls
+         * strlen()/printf("%s", ...) on it. */
+        if (*cInputIndex < MAX_INPUT_LENGTH - 1)
         {
             pcInputString[*cInputIndex] = cRxedChar;
             (*cInputIndex)++;
+            pcInputString[*cInputIndex] = '\0';
         }
     }
 } // void handleCharacterInput(uint8_t *cInputIndex, char *pcInputString)
