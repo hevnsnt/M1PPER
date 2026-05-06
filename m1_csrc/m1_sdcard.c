@@ -987,7 +987,11 @@ DRESULT m1_sdcard_read(uint8_t param, uint8_t *buff, DWORD sector, UINT count)
 		if ((status==pdTRUE) && (event==SDCARD_CB_READ_CPLT_MSG))
 		{
 			timer = osKernelGetTickCount();
-			/* block until SDIO IP is ready or a timeout occur */
+			/* Block until SDIO IP is ready or a timeout occurs.  audit 07 noted
+			 * the original busy-spin hogged ~50 ms of CPU at the tail of every
+			 * SD R/W (the host's SD_TRANSFER_OK transition can be tens of ms
+			 * after the DMA TC).  Yielding for one tick (1 ms) gives lower-
+			 * priority tasks a chance to run while the card finalises. */
 			while ( (osKernelGetTickCount() - timer) < SD_DATATIMEOUT )
 			{
 				if (m1_sdcard_getcardstate()==SD_TRANSFER_OK)
@@ -995,6 +999,7 @@ DRESULT m1_sdcard_read(uint8_t param, uint8_t *buff, DWORD sector, UINT count)
 					res = RES_OK;
 					break;
 				}
+				vTaskDelay(1);
 			} // while ( (osKernelGetTickCount() - timer) < SD_DATATIMEOUT )
         } // if ((status==pdTRUE) && (event==SDCARD_CB_READ_CPLT_MSG))
 	} // if (HAL_SD_ReadBlocks_DMA(phsd, buff, (uint32_t)sector, count)==HAL_OK)
@@ -1033,7 +1038,9 @@ DRESULT m1_sdcard_write(uint8_t param, const uint8_t *buff, DWORD sector, UINT c
 		if ((status==pdTRUE) && (event==SDCARD_CB_WRITE_CPLT_MSG))
 		{
 			timer = osKernelGetTickCount();
-			/* block until SDIO IP is ready or a timeout occur */
+			/* Block until SDIO IP is ready or a timeout occurs.  See matching
+			 * comment in m1_sdcard_read: write programming time on a typical
+			 * SD card is ~5-25 ms; yield for a tick instead of busy-spinning. */
 			while ( (osKernelGetTickCount() - timer) < SD_DATATIMEOUT )
 			{
 				if (m1_sdcard_getcardstate()==SD_TRANSFER_OK)
@@ -1041,6 +1048,7 @@ DRESULT m1_sdcard_write(uint8_t param, const uint8_t *buff, DWORD sector, UINT c
 					res = RES_OK;
 					break;
 				}
+				vTaskDelay(1);
 			} // while ( (osKernelGetTickCount() - timer) < SD_DATATIMEOUT )
         } // if ((status==pdTRUE) && (event==SDCARD_CB_READ_CPLT_MSG))
 	} // if ( HAL_SD_WriteBlocks_DMA(phsd, buff, (uint32_t)sector, count)==HAL_OK )
