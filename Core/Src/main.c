@@ -87,6 +87,8 @@ extern void HAL_TIM_MspPostInit(TIM_HandleTypeDef* htim);
 void assert_failed(uint8_t* file, uint32_t line);
 #endif // #ifdef USE_FULL_ASSERT
 
+#include "m1_crash_log.h"
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -111,7 +113,10 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  /* Surface any crash recorded on the prior boot, then clear and increment
+   * the boot counter. Must run after HAL_Init (PWR clocks ready) and before
+   * peripherals so it doesn't race with anything. Idempotent. */
+  m1_crash_log_check_and_log();
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -781,15 +786,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-	//__BKPT(); // Causes the processor to enter Debug state.
-  /* User can add his own implementation to report the HAL error return state */
-	//HAL_NVIC_SystemReset()
-  __disable_irq();
-  while (1)
-  {
-  }
-  /* USER CODE END Error_Handler_Debug */
+  /* Capture context to BKPSRAM and reset. Surfaced on next boot. */
+  m1_crash_record_simple(M1_CRASH_ERROR_HANDLER, NULL);
 }
 
 #ifdef  USE_FULL_ASSERT
@@ -802,10 +800,7 @@ void Error_Handler(void)
   */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-	M1_LOG_I(M1_LOGDB_TAG, "-Assert_failed: file %s on line %lu", file, line);
-  /* USER CODE END 6 */
+  /* HAL parameter assertion failed. Capture and reset. */
+  m1_crash_record_assert((const char *)file, line);
 }
 #endif /* USE_FULL_ASSERT */

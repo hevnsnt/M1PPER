@@ -20,6 +20,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32h5xx_it.h"
+#include "m1_crash_log.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -51,6 +52,29 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* Common entry called from naked fault stubs below. r0 = stacked frame
+ * pointer (MSP or PSP at moment of fault), r1 = fault kind, r2 = exc_return.
+ * Records fault state to BKPSRAM and resets the device. */
+__attribute__((used))
+static void m1_fault_dispatch(uint32_t *frame_ptr, uint32_t kind, uint32_t exc_return)
+{
+    m1_crash_frame_t f;
+    if (frame_ptr) {
+        f.r0  = frame_ptr[0];
+        f.r1  = frame_ptr[1];
+        f.r2  = frame_ptr[2];
+        f.r3  = frame_ptr[3];
+        f.r12 = frame_ptr[4];
+        f.lr  = frame_ptr[5];
+        f.pc  = frame_ptr[6];
+        f.psr = frame_ptr[7];
+    } else {
+        f.r0 = f.r1 = f.r2 = f.r3 = 0;
+        f.r12 = f.lr = f.pc = f.psr = 0;
+    }
+    m1_crash_record_fault((m1_crash_kind_t)kind, &f, exc_return);
+}
 
 /* USER CODE END 0 */
 
@@ -112,76 +136,75 @@ void NMI_Handler(void)
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
-   while (1)
-  {
-  }
+  /* If we reach here, something faulted via NMI without the ECC-recovery
+   * path consuming it. Capture and reset rather than wedging on while(1). */
+  m1_crash_record_simple(M1_CRASH_NMI, NULL);
   /* USER CODE END NonMaskableInt_IRQn 1 */
 }
 
-/**
-  * @brief This function handles Hard fault interrupt.
-  */
+/* HardFault — capture stacked frame from MSP or PSP per EXC_RETURN bit 2. */
+__attribute__((naked))
 void HardFault_Handler(void)
 {
-  /* USER CODE BEGIN HardFault_IRQn 0 */
-	static volatile int _go_db;
-
-	_go_db = 0;
-
-	while( _go_db==0 )
-		;
-	return;
-  /* USER CODE END HardFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
-    /* USER CODE END W1_HardFault_IRQn 0 */
-  }
+    __asm volatile (
+        "tst   lr, #4              \n"
+        "ite   eq                  \n"
+        "mrseq r0, msp             \n"
+        "mrsne r0, psp             \n"
+        "mov   r1, %0              \n"
+        "mov   r2, lr              \n"
+        "b     m1_fault_dispatch   \n"
+        :: "i"(M1_CRASH_HARDFAULT)
+        : "r0", "r1", "r2"
+    );
 }
 
-/**
-  * @brief This function handles Memory management fault.
-  */
+__attribute__((naked))
 void MemManage_Handler(void)
 {
-  /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
-  /* USER CODE END MemoryManagement_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
-    /* USER CODE END W1_MemoryManagement_IRQn 0 */
-  }
+    __asm volatile (
+        "tst   lr, #4              \n"
+        "ite   eq                  \n"
+        "mrseq r0, msp             \n"
+        "mrsne r0, psp             \n"
+        "mov   r1, %0              \n"
+        "mov   r2, lr              \n"
+        "b     m1_fault_dispatch   \n"
+        :: "i"(M1_CRASH_MEMMANAGE)
+        : "r0", "r1", "r2"
+    );
 }
 
-/**
-  * @brief This function handles Prefetch fault, memory access fault.
-  */
+__attribute__((naked))
 void BusFault_Handler(void)
 {
-  /* USER CODE BEGIN BusFault_IRQn 0 */
-
-  /* USER CODE END BusFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_BusFault_IRQn 0 */
-    /* USER CODE END W1_BusFault_IRQn 0 */
-  }
+    __asm volatile (
+        "tst   lr, #4              \n"
+        "ite   eq                  \n"
+        "mrseq r0, msp             \n"
+        "mrsne r0, psp             \n"
+        "mov   r1, %0              \n"
+        "mov   r2, lr              \n"
+        "b     m1_fault_dispatch   \n"
+        :: "i"(M1_CRASH_BUSFAULT)
+        : "r0", "r1", "r2"
+    );
 }
 
-/**
-  * @brief This function handles Undefined instruction or illegal state.
-  */
+__attribute__((naked))
 void UsageFault_Handler(void)
 {
-  /* USER CODE BEGIN UsageFault_IRQn 0 */
-
-  /* USER CODE END UsageFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
-    /* USER CODE END W1_UsageFault_IRQn 0 */
-  }
+    __asm volatile (
+        "tst   lr, #4              \n"
+        "ite   eq                  \n"
+        "mrseq r0, msp             \n"
+        "mrsne r0, psp             \n"
+        "mov   r1, %0              \n"
+        "mov   r2, lr              \n"
+        "b     m1_fault_dispatch   \n"
+        :: "i"(M1_CRASH_USAGEFAULT)
+        : "r0", "r1", "r2"
+    );
 }
 
 /**

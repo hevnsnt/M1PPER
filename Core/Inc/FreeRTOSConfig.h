@@ -82,6 +82,11 @@ extern uint32_t SystemCoreClock;
 #define configUSE_COUNTING_SEMAPHORES            1
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION  0
 #define configUSE_TICKLESS_IDLE                  0
+
+/* configASSERT records the failure in BKPSRAM and resets — far more useful
+ * than for(;;) which just hangs until IWDG. m1_crash_log_check_and_log on
+ * the next boot surfaces the file:line. */
+extern void m1_crash_record_assert(const char *file, unsigned long line) __attribute__((noreturn));
 #define configUSE_TASK_NOTIFICATIONS             1
 #define configHEAP_CLEAR_MEMORY_ON_FREE          0
 #define configUSE_MINI_LIST_ITEM                 1
@@ -160,7 +165,7 @@ See http://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html. */
 /* Normal assert() semantics without relying on the provision of an assert.h
 header file. */
 /* USER CODE BEGIN 1 */
-#define configASSERT( x ) if ((x) == 0) {taskDISABLE_INTERRUPTS(); for( ;; );}
+#define configASSERT( x ) if ((x) == 0) { m1_crash_record_assert(__FILE__, __LINE__); }
 /* USER CODE END 1 */
 
 #define SysTick_Handler xPortSysTickHandler

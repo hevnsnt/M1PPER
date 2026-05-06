@@ -41,12 +41,21 @@ _estack = ORIGIN(RAM) + LENGTH(RAM); /* end of "RAM" Ram type memory */
 _Min_Heap_Size = 0x400; /* required amount of heap */
 _Min_Stack_Size = 0x400; /* required amount of stack */
 
-/* Memories definition */
+/* Memories definition
+ *
+ * STM32H573VIT6 has 2MB dual-bank flash:
+ *   Bank 1: 0x08000000 - 0x080FFFFF (1024K, last 1K reserved for FW config)
+ *   Bank 2: 0x08100000 - 0x081FFFFF (1024K, available for code growth or A/B OTA)
+ *
+ * BKPSRAM (4K at 0x40036400) is exposed for crash telemetry that survives reset.
+ */
 MEMORY
 {
-  RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 640K
-  FLASH    (rx)    : ORIGIN = 0x08000000,   LENGTH = 1023K
-  FW_CONFIG_RESERVED	(rx)	: ORIGIN = 0x080FFC00, LENGTH = 1K  
+  RAM         (xrw)   : ORIGIN = 0x20000000,   LENGTH = 640K
+  FLASH       (rx)    : ORIGIN = 0x08000000,   LENGTH = 1023K
+  FW_CONFIG_RESERVED  (rx) : ORIGIN = 0x080FFC00, LENGTH = 1K
+  FLASH_BANK2 (rx)    : ORIGIN = 0x08100000,   LENGTH = 1024K
+  BKPSRAM     (xrw)   : ORIGIN = 0x40036400,   LENGTH = 4K
 }
 
 /* Sections */
@@ -186,6 +195,26 @@ SECTIONS
     . = . + _Min_Stack_Size;
     . = ALIGN(8);
   } >RAM
+
+  /* Crash telemetry — survives reset via backup SRAM. Populated by HardFault
+   * and friends (CFSR/HFSR/MMFAR/BFAR + stacked frame + task name), consumed
+   * by main on next boot. NOLOAD: no init image; its contents are preserved
+   * across software-reset and warm boots. */
+  .crash_log (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.crash_log)
+    . = ALIGN(4);
+  } >BKPSRAM
+
+  /* Bank 2 of the dual-bank flash. Empty by default. Targets that need to be
+   * placed in bank 2 should declare a section like .text.bank2 and assign it
+   * here explicitly. Reserved for code growth and future A/B firmware update. */
+  .bank2 (NOLOAD) :
+  {
+    *(.text.bank2)
+    *(.rodata.bank2)
+  } >FLASH_BANK2
 
   /* Remove information from the compiler libraries */
   /DISCARD/ :

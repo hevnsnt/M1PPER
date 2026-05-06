@@ -22,6 +22,7 @@
 #include "nfc_driver.h"
 #include "m1_compile_cfg.h"
 #include "m1_menu.h"
+#include "m1_crash_log.h"
 #ifdef M1_APP_RPC_ENABLE
 #include "m1_rpc.h"
 #endif
@@ -168,8 +169,10 @@ void vApplicationIdleHook(void)
 
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
-	M1_LOG_E(M1_LOGDB_TAG, "Task %s caused stack overflow!\r\n", pcTaskName);
-	Error_Handler();
+	(void)xTask;
+	/* Stack is corrupted. Cannot rely on M1_LOG_E (allocates) or any FreeRTOS
+	 * API that walks task state. Capture name + reset via BKPSRAM. */
+	m1_crash_record_simple(M1_CRASH_STACK_OVF, pcTaskName);
 } // void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 
 
@@ -183,13 +186,9 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 /*============================================================================*/
 void vApplicationMallocFailedHook(void)
 {
-	M1_LOG_E(M1_LOGDB_TAG, "Heap allocation failed!\r\n");
-	//Error_Handler();
-	// These return the available heap space and the least amount of free heap space ever recorded
-	//xPortGetFreeHeapSize();
-	//xPortGetMinimumEverFreeHeapSize();
-	//vTaskGetInfo();
-	//uxTaskGetStackHighWaterMark();
+	/* Many call sites assume non-NULL pvPortMalloc and would deref NULL on
+	 * the next instruction. Capture and reset rather than continue. */
+	m1_crash_record_simple(M1_CRASH_MALLOC_FAIL, NULL);
 } // void vApplicationMallocFailedHook (void)
 
 

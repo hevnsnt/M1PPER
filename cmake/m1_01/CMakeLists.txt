@@ -72,6 +72,7 @@ target_sources(m1_01 INTERFACE
     ../../Core/Src/FreeRTOS_CLI.c
     ../../Core/Src/app_freertos.c
     ../../Core/Src/cli_app.c
+    ../../Core/Src/m1_crash_log.c
     ../../Core/Src/main.c
     ../../Core/Src/stm32h5xx_hal_msp.c
     ../../Core/Src/stm32h5xx_hal_timebase_tim.c
