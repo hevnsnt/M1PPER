@@ -2352,15 +2352,21 @@ static bool wifi_attack_target_actions(uint8_t idx)
 			}
 			else if (selected == WIFI_ATK_ACT_EAPOLLOGOFF)
 			{
+				/* Renamed from "PMF bypass" -- EAPOL-Logoff is L2
+				 * EAPOL, NOT a 802.11 management frame, so it does
+				 * not actually bypass PMF/802.11w. It only works on
+				 * APs that leave management-frame protection
+				 * disabled. */
 				wifi_display_panel("EAPOL-Logoff",
 					s_attack_targets[idx].bssid,
-					"Sending EAPOL",
-					"frames (PMF bypass)");
-				if (wifi_esp_eapollogoff(s_attack_targets[idx].bssid,
-				                         s_attack_targets[idx].channel) == SUCCESS)
+					"Sending EAPOL frames",
+					"(no MFP)");
+				uint8_t res = wifi_esp_eapollogoff(s_attack_targets[idx].bssid,
+				                                  s_attack_targets[idx].channel);
+				if (res == SUCCESS)
 					wifi_display_msg("EAPOL-Logoff", "Sent!");
 				else
-					wifi_display_msg("EAPOL-Logoff", "Failed/Unsupported");
+					wifi_display_msg("EAPOL-Logoff", "Refused: PMF/no STA");
 				vTaskDelay(pdMS_TO_TICKS(1500));
 			}
 			else if (selected == WIFI_ATK_ACT_REMOVE)

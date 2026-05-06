@@ -20,6 +20,18 @@ bool get_esp32_main_init_status(void);
 void esp32_main_force_reinit(void);
 void esp32_main_init(void);
 uint8_t spi_AT_send_recv(const char *at_cmd, char *out_buf, int out_buf_size, int timeout_sec);
+
+/* Slave-restart event surface. Set by spi_trans_control_task whenever
+ * the slave's seq_num resets to 1 unexpectedly (typical sign of an
+ * ESP32 panic + reboot). Feature code that holds remote state
+ * (BLE init mode, advertising state, AP config, server sockets) must
+ * poll and rebuild on its next iteration. Reading clears the flag. */
+bool esp_consume_slave_restart_event(void);
+
+/* Boot-time AT firmware identity check. Reads AT+GMR and verifies the
+ * response identifies an ESP32C6-SPI build. Returns true on match.
+ * On false the caller should display a "Wrong AT firmware" warning. */
+bool esp_at_verify_firmware_id(void);
 uint8_t wifi_get_mode(ctrl_cmd_t *app_req);
 uint8_t wifi_get_stats(ctrl_cmd_t *app_req);
 uint8_t wifi_ap_scan_list(ctrl_cmd_t *app_req);

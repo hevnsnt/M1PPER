@@ -13,6 +13,8 @@
 /*************************** I N C L U D E S **********************************/
 
 #include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
 #include "stm32h5xx_hal.h"
@@ -37,6 +39,67 @@
 
 
 /*************** F U N C T I O N   I M P L E M E N T A T I O N ****************/
+
+/******************************************************************************/
+/**
+  * @brief Test whether the buffer ends in an AT-final response terminator.
+  *
+  * Per ESP-AT protocol the device emits a final "\r\nOK\r\n" or
+  * "\r\nERROR\r\n" at the END of every command response. Embedded
+  * substrings (SSID names, GATT values, +IPD blobs) can contain "OK"
+  * or "ERROR" which the previous strstr-based check matched
+  * incorrectly, producing false success/failure.
+  *
+  * Match strictly at the buffer tail. Treat the very first response
+  * as a special case: when the entire buffer is exactly "OK\r\n" or
+  * "ERROR\r\n" with no preceding payload, accept it (this is what
+  * a bare AT command yields).
+  */
+/******************************************************************************/
+bool at_response_is_terminated(const char *buf, size_t len, bool *is_error)
+{
+    static const char OK_TAIL[]    = "\r\nOK\r\n";
+    static const char ERR_TAIL[]   = "\r\nERROR\r\n";
+    static const char OK_BARE[]    = "OK\r\n";
+    static const char ERR_BARE[]   = "ERROR\r\n";
+    const size_t ok_tail_n  = sizeof(OK_TAIL)  - 1;
+    const size_t err_tail_n = sizeof(ERR_TAIL) - 1;
+    const size_t ok_bare_n  = sizeof(OK_BARE)  - 1;
+    const size_t err_bare_n = sizeof(ERR_BARE) - 1;
+    bool err_local = false;
+
+    if (!buf || len == 0)
+        return false;
+
+    if (len >= err_tail_n &&
+        memcmp(buf + len - err_tail_n, ERR_TAIL, err_tail_n) == 0)
+    {
+        err_local = true;
+        if (is_error) *is_error = err_local;
+        return true;
+    }
+    if (len >= ok_tail_n &&
+        memcmp(buf + len - ok_tail_n, OK_TAIL, ok_tail_n) == 0)
+    {
+        if (is_error) *is_error = err_local;
+        return true;
+    }
+    /* Bare-line responses: only accept if the buffer itself is the
+     * complete response (length exactly equals OK_BARE/ERR_BARE). */
+    if (len == err_bare_n && memcmp(buf, ERR_BARE, err_bare_n) == 0)
+    {
+        err_local = true;
+        if (is_error) *is_error = err_local;
+        return true;
+    }
+    if (len == ok_bare_n && memcmp(buf, OK_BARE, ok_bare_n) == 0)
+    {
+        if (is_error) *is_error = err_local;
+        return true;
+    }
+    return false;
+}
+
 
 /******************************************************************************/
 /**

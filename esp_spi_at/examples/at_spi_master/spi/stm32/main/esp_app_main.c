@@ -63,6 +63,14 @@ static uint8_t current_send_seq = 0;
 static uint8_t current_recv_seq = 0;
 
 static bool esp32_main_init_done = false;
+/* Sticky flag set by spi_trans_control_task when it sees an
+ * unexpected slave seq_num==1 on a fresh transaction (slave reboot).
+ * spi_AT_send_recv consults this to surface a clear error to the
+ * caller, and feature code can poll it to rebuild BLE/WiFi state. */
+static volatile bool s_esp_slave_restarted = false;
+/* Last hardware-layer SPI error from at_spi_master_send_data.
+ * Propagated up to the caller via the response semaphore path. */
+static volatile HAL_StatusTypeDef s_last_hal_status = HAL_OK;
 
 /* uid to link between requests and responses
  * uids are incrementing values from 1 onwards. */
@@ -106,6 +114,15 @@ static void at_spi_master_send_data(uint8_t* data, uint32_t len)
         .tx_buffer = (void*)data
     };
 	ret = spi_device_polling_transmit(spi_dev_handle, &trans);
+	/* Record HAL status so spi_AT_send_recv can surface a real
+	 * transport failure instead of timing out at 30s. */
+	s_last_hal_status = ret;
+	if (ret != HAL_OK) {
+		M1_LOG_E(TAG, "SPI WRDMA failed HAL=%d len=%u\r\n", (int)ret, (unsigned)len);
+		/* Do NOT advance current_uid on send failure: the slave never
+		 * received the data so any response would be stale or stuck. */
+		return;
+	}
 	current_uid = uid; // Update current request command id after it has been transmitted
 }
 
@@ -250,7 +267,8 @@ static void spi_trans_control_task(void* arg)
             if (recv_opt.seq_num != current_send_seq) {
                 M1_LOG_E(TAG, "SPI send seq error, %x, %x\r\n", recv_opt.seq_num, current_send_seq);
                 if (recv_opt.seq_num == 1) {
-                    M1_LOG_E(TAG, "Maybe SLAVE restart, ignore\r\n");
+                    M1_LOG_E(TAG, "SLAVE restart detected (write path) - flagging\r\n");
+                    s_esp_slave_restarted = true;
                 }
                 current_send_seq = recv_opt.seq_num;
             }
@@ -288,7 +306,8 @@ static void spi_trans_control_task(void* arg)
             if (recv_opt.seq_num != ((current_recv_seq + 1) & 0xFF)) {
                 M1_LOG_E(TAG, "SPI recv seq error, %x, %x\r\n", recv_opt.seq_num, (current_recv_seq + 1));
                 if (recv_opt.seq_num == 1) {
-                    M1_LOG_E(TAG, "Maybe SLAVE restart, ignore\r\n");
+                    M1_LOG_E(TAG, "SLAVE restart detected (read path) - flagging\r\n");
+                    s_esp_slave_restarted = true;
                 }
                 current_recv_seq = recv_opt.seq_num;
             }
@@ -522,6 +541,9 @@ uint8_t spi_AT_send_recv(const char *at_cmd, char *out_buf, int out_buf_size, in
 	M1_LOG_I(TAG, "SPI TX [%ds]: %.*s\r\n", timeout_sec,
 	         (int)(req.cmd_len > 60 ? 60 : req.cmd_len), at_cmd);
 
+	/* Reset HAL status before send so we can detect a fresh failure. */
+	s_last_hal_status = HAL_OK;
+
 	ret = spi_AT_app_send_command(&req);
 	if (ret != SUCCESS)
 	{
@@ -531,6 +553,18 @@ uint8_t spi_AT_send_recv(const char *at_cmd, char *out_buf, int out_buf_size, in
 		return ret;
 	}
 	expected_uid = (uint32_t)req.uid;
+
+	/* Hardware-layer SPI failure recorded by at_spi_master_send_data?
+	 * Surface immediately so callers don't block for 30s in get_response. */
+	if (s_last_hal_status != HAL_OK) {
+		M1_LOG_E(TAG, "SPI HAL failure HAL=%d cmd='%.*s'\r\n",
+		         (int)s_last_hal_status,
+		         (int)(req.cmd_len > 40 ? 40 : req.cmd_len), at_cmd);
+		snprintf(out_buf, out_buf_size, "SPI_HAL_ERR=%d",
+		         (int)s_last_hal_status);
+		xSemaphoreGive(esp_ctrl_req_sem);
+		return CTRL_ERR_TRANSPORT_SEND;
+	}
 
 	/* Collect responses until OK/ERROR/timeout (up to buffer) */
 	while (total_len < out_buf_size - 1)
@@ -555,12 +589,14 @@ uint8_t spi_AT_send_recv(const char *at_cmd, char *out_buf, int out_buf_size, in
 		out_buf[total_len] = '\0';
 		free(rx_buf);
 
-		/* Stop if we got a final response */
-		if (strstr(out_buf, "\r\nOK\r\n") || strstr(out_buf, "\r\nERROR\r\n")
-				|| strstr(out_buf, "OK\r\n") || strstr(out_buf, "ERROR\r\n"))
+		/* Stop if we got a final response. Match strictly at buffer
+		 * tail, not as a substring -- payload "OK" inside SSID names
+		 * or GATT values must not trigger termination. */
+		bool is_err = false;
+		if (at_response_is_terminated(out_buf, (size_t)total_len, &is_err))
 		{
 			M1_LOG_I(TAG, "SPI RX [%d bytes]: %s", total_len,
-			         strstr(out_buf, "ERROR") ? "ERROR" : "OK");
+			         is_err ? "ERROR" : "OK");
 			break;
 		}
 	}
@@ -737,6 +773,50 @@ void esp32_main_init(void)
 
 	esp32_main_init_done = true;
 } // void app_main(void)
+
+
+/* Read-and-clear the slave-restart event flag. Intended to be polled
+ * by feature loops that hold remote ESP32 state (BLE init, advertising,
+ * SoftAP, server sockets). On true the caller should re-issue the
+ * sequence of AT setup commands needed to rebuild that state. */
+bool esp_consume_slave_restart_event(void)
+{
+	if (s_esp_slave_restarted) {
+		s_esp_slave_restarted = false;
+		return true;
+	}
+	return false;
+}
+
+
+/* AT+GMR identity check. Checks the response for a "ESP32C6-SPI"
+ * substring (the ESP-AT build identifier). Returns false if the
+ * AT bridge is the UART-only stock build, in which case all SPI
+ * AT commands will appear to succeed but the slave will not respond
+ * to anything. Caller (m1_esp32_hal init flow or feature code)
+ * surfaces a "Wrong AT firmware - flash factory_ESP32C6-SPI.bin"
+ * warning to the user. */
+bool esp_at_verify_firmware_id(void)
+{
+	static char gmr_buf[256];
+	uint8_t ret;
+
+	gmr_buf[0] = '\0';
+	ret = spi_AT_send_recv("AT+GMR\r\n", gmr_buf, sizeof(gmr_buf), 3);
+	if (ret != SUCCESS) {
+		M1_LOG_E(TAG, "AT+GMR failed ret=%u\r\n", (unsigned)ret);
+		return false;
+	}
+
+	/* The first ~200 bytes contain "AT version:" and a "Module:" or
+	 * compile identifier. Stock ESP32-AT UART builds never carry
+	 * the "ESP32C6-SPI" string. Reject anything that does not. */
+	if (strstr(gmr_buf, "ESP32C6-SPI") != NULL)
+		return true;
+
+	M1_LOG_E(TAG, "AT firmware identity mismatch (no ESP32C6-SPI marker)\r\n");
+	return false;
+}
 
 
 static void esp_free_mem( char **buf_ptr)
@@ -2136,13 +2216,56 @@ uint8_t wifi_esp_hscap_start(const char *bssid, uint8_t channel, uint16_t deauth
 	return wifi_esp_run_simple_cmd(cmd, 35, resp, sizeof(resp));
 }
 
+/* EAPOL-Logoff is L2 EAPOL traffic, NOT an 802.11 management frame,
+ * so it is NOT a true PMF/802.11w bypass. It only deauthorizes the
+ * supplicant on APs that ALSO leave management-frame protection
+ * disabled. Refuse to send when AP advertises PMF=Required to avoid
+ * misleading the operator about technique scope. The PMF capability
+ * byte is parsed from CWLAP and surfaced via the wifi_scanlist_t
+ * pmf_required flag; the caller must pass it through. */
 uint8_t wifi_esp_eapollogoff(const char *bssid, uint8_t channel)
 {
 	char cmd[96];
 	char resp[256];
+	char qcmd[96];
+	char qresp[256];
 
 	if (bssid == NULL || bssid[0] == '\0' || channel < 1U || channel > 14U)
 		return ERROR;
+
+	/* Verify the station is currently associated. CWJAP? returns
+	 *   +CWJAP:<ssid>,<bssid>,<channel>,<rssi>,<pci_en>,<reconn>,<listen_intvl>,<scan_mode>,<pmf>
+	 * If not associated, the response is "No AP" and the EAPOL frame
+	 * has no associated key/IV and the AP will silently drop it. */
+	snprintf(qcmd, sizeof(qcmd), "AT+CWJAP?\r\n");
+	if (spi_AT_send_recv(qcmd, qresp, sizeof(qresp), 3) != SUCCESS)
+		return ERROR;
+	if (strstr(qresp, "No AP") != NULL || strstr(qresp, "+CWJAP:") == NULL)
+	{
+		M1_LOG_E(TAG, "EAPOL-Logoff aborted: station not associated\r\n");
+		return ERROR;
+	}
+	/* The last comma-separated field of +CWJAP: line is <pmf>:
+	 *   bit0 = capable, bit1 = required.
+	 * If "required" is set, refuse to send. */
+	{
+		const char *p = strstr(qresp, "+CWJAP:");
+		const char *line_end;
+		const char *last_comma;
+		if (p) {
+			line_end = strstr(p, "\r\n");
+			if (!line_end) line_end = p + strlen(p);
+			last_comma = line_end;
+			while (last_comma > p && *last_comma != ',') last_comma--;
+			if (*last_comma == ',') {
+				int pmf = atoi(last_comma + 1);
+				if (pmf & 0x02) {
+					M1_LOG_E(TAG, "EAPOL-Logoff aborted: AP requires PMF (pmf=%d)\r\n", pmf);
+					return ERROR;
+				}
+			}
+		}
+	}
 
 	snprintf(cmd, sizeof(cmd), "%s\"%s\",%u\r\n",
 	         ESP32C6_AT_REQ_EAPOLLOGOFF, bssid, channel);
