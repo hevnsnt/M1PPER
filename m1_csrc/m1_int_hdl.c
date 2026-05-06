@@ -11,6 +11,7 @@
 
 #include <m1_sub_ghz_decenc.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include "stm32h5xx_hal.h"
 #include "main.h"
 #include "m1_int_hdl.h"
@@ -630,6 +631,28 @@ void TIM1_UP_IRQHandler(void)
 	portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
 	uint16_t toggle;
 
+	/* TIM1 is shared between Sub-GHz RX (input capture, channel 1) and
+	 * Sub-GHz TX (DMA-driven PWM, channel 4N).  sub_ghz_rx_init() enables
+	 * UPDATE interrupts on TIM1 to detect a 20 ms RX silence (timeout); if
+	 * we let that fall through into the TX path we corrupt subghz_tx_tc_flag
+	 * and emit phantom Q_EVENT_SUBGHZ_TX events.
+	 *
+	 * Disambiguate by looking at the DMA channel state: if the RX timer is
+	 * armed for input capture (CC1 enabled) and TX DMA is NOT running, the
+	 * update event belongs to the RX path and should be silently absorbed. */
+	bool tx_dma_active = (hdma_subghz_tx.Instance != NULL) &&
+	                     ((hdma_subghz_tx.Instance->CCR & DMA_CCR_EN) != 0U);
+	bool rx_capture_armed = ((timerhdl_subghz_rx.Instance->CCER & TIM_CCER_CC1E) != 0U);
+
+	if (!tx_dma_active && rx_capture_armed)
+	{
+		/* RX-timeout update.  Just clear the flag — the RX-side decoder
+		 * already handles its own end-of-packet condition through the
+		 * input-capture gap detector. */
+		__HAL_TIM_CLEAR_FLAG(&timerhdl_subghz_rx, TIM_FLAG_UPDATE);
+		return;
+	}
+
 	// Clear the update interrupt flag
 	__HAL_TIM_CLEAR_FLAG(&timerhdl_subghz_tx, TIM_FLAG_UPDATE);
 	if ( !subghz_tx_tc_flag ) // DMA not completed?
@@ -680,11 +703,14 @@ void TIM1_CC_IRQHandler(void)
 	/* Clear Capture Compare flag */
 	__HAL_TIM_CLEAR_FLAG(&timerhdl_subghz_rx, TIM_FLAG_CC1);
 
-	//cap_val =  HAL_TIM_ReadCapturedValue(htim, IR_DECODE_TIMER_RX_CHANNEL);
-	//cap_val = __HAL_TIM_GET_COMPARE(htim, IR_DECODE_TIMER_RX_CHANNEL); // read compare counter
-	//__HAL_TIM_SET_COMPARE(htim, IR_DECODE_TIMER_RX_CHANNEL, 0); // reset counter after reading, htim->Instance->CCR4 = 0x00;
-	cap_val =  __HAL_TIM_GET_COUNTER(&timerhdl_subghz_rx);
-	__HAL_TIM_SET_COUNTER(&timerhdl_subghz_rx, 0); // reset counter after reading, htim->Instance->CNT = 0x00;
+	/* Read the captured time-since-previous-edge.
+	 *
+	 * The timer is configured for slave-mode RESET on each input-capture
+	 * edge, so CCR1 atomically holds the count between the previous and
+	 * current edges.  Reading CNT here would include ISR-entry latency
+	 * (1-5 us under load) on every pulse, which permanently distorts every
+	 * downstream OOK decoder. */
+	cap_val = __HAL_TIM_GET_COMPARE(&timerhdl_subghz_rx, SUBGHZ_RX_TIMER_RX_CHANNEL);
 
 	if ( subghz_decenc_ctl.pulse_det_stat==PULSE_DET_IDLE )
 	{

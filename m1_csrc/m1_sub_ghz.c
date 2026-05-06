@@ -3605,7 +3605,9 @@ static void sub_ghz_rx_init(void)
 	GPIO_InitTypeDef gpio_init_struct;
 	TIM_IC_InitTypeDef tim_ic_init = {0};
 	TIM_MasterConfigTypeDef tim_master_conf = {0};
+	TIM_SlaveConfigTypeDef tim_slave_conf = {0};
 	uint32_t tim_prescaler_val;
+	uint32_t tim_kernel_hz;
 
 	/* Pin configuration: input floating */
 	gpio_init_struct.Pin = SUBGHZ_RX_GPIO_PIN;
@@ -3618,8 +3620,23 @@ static void sub_ghz_rx_init(void)
 	/*  Clock Configuration for TIMER */
 	SUBGHZ_RX_TIMER_CLK();
 
-	/* Timer Clock */
-	tim_prescaler_val = (uint32_t) (HAL_RCC_GetPCLK2Freq() / 1000000) - 1; // 1MHz
+	/* Timer Clock — derive prescaler so the timer ticks at 1 MHz (1 us/tick).
+	 *
+	 * On STM32H5 the timer kernel clock is APB2 when the APB2 prescaler is 1,
+	 * otherwise it is 2 * APB2.  Always trust the HAL helper rather than a
+	 * compile-time constant because SYSCLK can move (75 -> 250 MHz) without
+	 * touching this file. */
+	{
+		uint32_t apb2_freq = HAL_RCC_GetPCLK2Freq();
+		uint32_t pclk2_div = (RCC->CFGR2 & RCC_CFGR2_PPRE2) >> RCC_CFGR2_PPRE2_Pos;
+		if (pclk2_div < 4U)
+			tim_kernel_hz = apb2_freq;          /* APB2 prescaler == 1 */
+		else
+			tim_kernel_hz = apb2_freq * 2U;     /* APB2 prescaler > 1, TIM clock x2 */
+		if (tim_kernel_hz < 1000000UL)
+			tim_kernel_hz = 1000000UL;          /* defensive */
+		tim_prescaler_val = (tim_kernel_hz / 1000000UL) - 1U;
+	}
 
 	timerhdl_subghz_rx.Instance = SUBGHZ_RX_TIMER;
 
@@ -3635,13 +3652,12 @@ static void sub_ghz_rx_init(void)
 		Error_Handler();
 	}
 
-  /* Enable the Master/Slave Mode */
-  /* SMS = 1000:Combined reset + trigger mode - Rising edge of the selected trigger input (tim_trgi)
-   * reinitializes the counter, generates an update of the registers and starts the counter.
-   * SMS = 0100: Reset mode - Rising edge of the selected trigger input (tim_trgi)
-   * reinitializes the counter and generates an update of the registers. -Recommended by Reference Manual
-   */
-	tim_master_conf.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;//TIM_SMCR_MSM;
+  /* Enable the Master/Slave Mode.  The timer is its own master; we run it in
+   * slave-mode RESET so each input-capture edge atomically latches the time
+   * since the previous edge into CCR1 and resets CNT in hardware.  This
+   * removes the 1-5 us ISR-entry jitter that an SW "GET_COUNTER + SET_COUNTER(0)"
+   * pattern would otherwise inject. */
+	tim_master_conf.MasterSlaveMode = TIM_MASTERSLAVEMODE_ENABLE;
 	tim_master_conf.MasterOutputTrigger = TIM_TRGO_RESET;
 	if (HAL_TIMEx_MasterConfigSynchronization(&timerhdl_subghz_rx, &tim_master_conf) != HAL_OK)
 	{
@@ -3656,6 +3672,20 @@ static void sub_ghz_rx_init(void)
 	if (HAL_TIM_IC_ConfigChannel(&timerhdl_subghz_rx, &tim_ic_init, SUBGHZ_RX_TIMER_RX_CHANNEL) != HAL_OK)
 	{
 		//_Error_Handler(__FILE__, __LINE__);
+		Error_Handler();
+	}
+
+	/* Slave-mode RESET on TI1 rising edge.  TI1FP1 is the filtered input
+	 * from CH1 which is what SUBGHZ_RX_TIMER_RX_CHANNEL maps to.  With
+	 * BOTHEDGE polarity above, every edge fires the capture; the slave
+	 * controller resets CNT on TI1 internally so CCR1 always contains
+	 * "ticks since previous edge". */
+	tim_slave_conf.SlaveMode     = TIM_SLAVEMODE_RESET;
+	tim_slave_conf.InputTrigger  = TIM_TS_TI1FP1;
+	tim_slave_conf.TriggerPolarity = TIM_TRIGGERPOLARITY_BOTHEDGE;
+	tim_slave_conf.TriggerFilter = 0;
+	if (HAL_TIM_SlaveConfigSynchro(&timerhdl_subghz_rx, &tim_slave_conf) != HAL_OK)
+	{
 		Error_Handler();
 	}
 

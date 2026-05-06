@@ -1163,16 +1163,24 @@ void SI446x_Set_Frequency(uint32_t freq_hz)
     double f_pfd;
 
     /* Select output divider and MODEM_CLKGEN_BAND based on frequency.
-     * XTAL = 32 MHz. BAND→outdiv: 0→4, 1→10, 2→8, 3→12.
-     * VCO range is 3.4–4.2 GHz. */
+     * XTAL = 32 MHz. BAND→outdiv: 0→4, 1→10, 2→8, 3→12, 5→24.
+     * VCO range is 3.4–4.2 GHz; outdiv=24 gives 142–283 MHz. */
     if (freq_hz >= 850000000UL) {
         outdiv = 4;  clkgen_band = 0x08;  /* BAND=0, SY_SEL=1 */
     } else if (freq_hz >= 420000000UL) {
         outdiv = 8;  clkgen_band = 0x0A;  /* BAND=2, SY_SEL=1 */
     } else if (freq_hz >= 340000000UL) {
         outdiv = 10; clkgen_band = 0x09;  /* BAND=1, SY_SEL=1 */
+    } else if (freq_hz >= 142000000UL) {
+        /* Low band: 142-283 MHz (US POCSAG, low VHF spectrum, 169 MHz wireless M-bus).
+         * Without this branch, outdiv=12 produces VCO=1.8 GHz at 150 MHz which is
+         * far below the Si4463 VCO floor of 3.4 GHz; the synthesizer cannot lock
+         * and all RX/TX silently fails. */
+        outdiv = 24; clkgen_band = 0x0D;  /* BAND=5, SY_SEL=1 */
     } else {
-        outdiv = 12; clkgen_band = 0x0B;  /* BAND=3, SY_SEL=1 */
+        /* Out of supported range; fall back to outdiv=24 so caller still sees
+         * a valid set rather than an unlockable synth. */
+        outdiv = 24; clkgen_band = 0x0D;
     }
 
     /* f_pfd = 2 * XTAL / outdiv (phase-frequency detector rate) */
