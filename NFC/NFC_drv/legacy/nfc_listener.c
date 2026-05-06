@@ -111,7 +111,12 @@ typedef enum {
 static rfalNfcDevice *s_ceActiveDev = NULL;
 static uint8_t       *s_ceRxData    = NULL;
 static uint16_t      *s_ceRxRcvLen  = NULL;
-static uint8_t        g_ceTxBuf[560];  /* Must fit NTAG215 FAST_READ 0-134: 135*4=540 bytes */
+/* TX buffer must accommodate the largest single response a T2T persona
+ * may produce.  NTAG216 FAST_READ from page 0 to 230 yields 231 * 4 = 924
+ * bytes of payload plus 2 CRC bytes = 926 bytes.  The previous 560-byte
+ * buffer silently truncated FAST_READ replies, which sophisticated readers
+ * detect as a malformed responder.  Bump to 1024 for headroom. */
+static uint8_t        g_ceTxBuf[1024];
 static bool s_firstRxHandled = false;
 static CePhase_t     s_cePhase   = CE_PHASE_IDLE;
 static uint8_t       *s_rxData    = NULL;   // Buffer pointer managed by RFAL
@@ -591,9 +596,26 @@ static bool CeHandleMfcCmdRx(const uint8_t *rx, uint16_t rxBits)
             return false;
         }
 
-        /* Generate nT from HAL tick */
+        /* Generate nT.
+         *
+         * Real MIFARE Classic cards drive nT through the 16-bit LFSR PRNG
+         * defined by the polynomial x^16 + x^14 + x^13 + x^11 + 1, see
+         * mfc_prng_successor.  Sophisticated readers (Proxmark "hf mf check"
+         * with -v, Chameleon detection) flag a non-LFSR distribution as a
+         * fake card.  Seed from TRNG-ish entropy (tick + DWT->CYCCNT) and
+         * advance through the LFSR a random number of steps so the emitted
+         * nonce sits on the natural orbit of the LFSR.
+         *
+         * Note: we still emit a *fresh* nT each auth (i.e. a "hardened"
+         * card with no replay) — this only fixes the statistical signature,
+         * not the cryptographic property.  An mfkey32-style attacker still
+         * gets different (nT, nR, aR) tuples by design. */
         extern uint32_t HAL_GetTick(void);
-        s_mfcCe.nT = HAL_GetTick() * 0x19660D + 0x3C6EF35F;
+        volatile uint32_t *dwt_cyccnt = (volatile uint32_t *)0xE0001004UL;
+        uint32_t seed = HAL_GetTick() ^ (*dwt_cyccnt) ^ 0xA5A5A5A5U;
+        seed = seed * 0x9E3779B9U + 0xBF58476DU;
+        uint32_t advance = 16U + (seed & 0xFFU);
+        s_mfcCe.nT = mfc_prng_successor(seed, advance);
 
         /* Initialize Crypto-1 cipher */
         uint64_t key64 = 0;
