@@ -679,8 +679,15 @@ static int ep_find_ipd(const char *buf, int *conn_id, int *length, int *header_l
 /**
   * @brief Send an HTTP/1.1 response over the given AT connection id.
   *
-  * Builds the response header inline, calls AT+CIPSEND with the
-  * combined header+body length, then writes the bytes.
+  * Implements the proper ESP-AT CIPSEND state machine:
+  *   1. Send "AT+CIPSEND=<id>,<len>\r\n", expect "OK\r\n>" prompt.
+  *   2. Stream the raw payload bytes (NO \r\n framing).
+  *   3. Wait for "SEND OK" (success) or "SEND FAIL"/"link is not valid".
+  *
+  * The previous single spi_AT_send_recv path violated all three steps:
+  * it sent header+body as one AT command (which the AT layer then
+  * appended \r\n to, corrupting the body) and treated either OK or
+  * SEND OK as success even when the payload write itself failed.
   */
 /*============================================================================*/
 static bool ep_send_response(int conn_id, const char *status_line,
@@ -690,6 +697,7 @@ static bool ep_send_response(int conn_id, const char *status_line,
     int hlen;
     char cmd[64];
     int total;
+    static char send_buf[EP_AT_BUF_SIZE];
 
     if (body_len <= 0) body_len = (int)strlen(body);
 
@@ -702,45 +710,41 @@ static bool ep_send_response(int conn_id, const char *status_line,
                     status_line, body_len);
 
     total = hlen + body_len;
-    snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d,%d\r\n", conn_id, total);
+    if (total >= (int)sizeof(send_buf)) total = (int)sizeof(send_buf) - 1;
 
+    /* Step 1: announce send length. Slave responds OK\r\n then ">". */
+    snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d,%d\r\n", conn_id, total);
     if (spi_AT_send_recv(cmd, s_ep_at_buf, sizeof(s_ep_at_buf),
                          EP_AT_TIMEOUT_SHORT) != SUCCESS)
         return false;
+    if (strstr(s_ep_at_buf, "ERROR") != NULL ||
+        strstr(s_ep_at_buf, "link is not valid") != NULL)
+        return false;
 
-    /* The ESP32 AT firmware emits a "> " prompt after CIPSEND.  We send the
-     * payload as one big AT command (header + body, no trailing CRLF) so
-     * that the AT layer streams it directly to the socket. */
+    /* Step 2: assemble raw payload (header + body) into send_buf. */
     {
-        /* Use a static local buffer for the combined send to avoid heap. */
-        static char send_buf[EP_AT_BUF_SIZE];
-        int copy;
-        if (total >= (int)sizeof(send_buf)) total = (int)sizeof(send_buf) - 1;
-
-        copy = hlen;
+        int copy = hlen;
         if (copy >= (int)sizeof(send_buf)) copy = (int)sizeof(send_buf) - 1;
         memcpy(send_buf, hdr, copy);
-
-        if (copy + body_len < (int)sizeof(send_buf))
-        {
-            memcpy(send_buf + copy, body, body_len);
-            send_buf[copy + body_len] = '\0';
-        }
-        else
-        {
-            int room = (int)sizeof(send_buf) - 1 - copy;
-            if (room < 0) room = 0;
-            memcpy(send_buf + copy, body, room);
-            send_buf[copy + room] = '\0';
-        }
-
-        if (spi_AT_send_recv(send_buf, s_ep_at_buf, sizeof(s_ep_at_buf),
-                             EP_AT_TIMEOUT_LONG) != SUCCESS)
-            return false;
+        int room = (int)sizeof(send_buf) - 1 - copy;
+        if (room < 0) room = 0;
+        int btake = (body_len < room) ? body_len : room;
+        memcpy(send_buf + copy, body, btake);
+        send_buf[copy + btake] = '\0';
     }
 
-    return (strstr(s_ep_at_buf, "SEND OK") != NULL ||
-            strstr(s_ep_at_buf, "OK")      != NULL);
+    /* Step 3: stream raw bytes; expect "SEND OK" terminator. */
+    if (spi_AT_send_recv(send_buf, s_ep_at_buf, sizeof(s_ep_at_buf),
+                         EP_AT_TIMEOUT_LONG) != SUCCESS)
+        return false;
+
+    if (strstr(s_ep_at_buf, "SEND OK") != NULL)
+        return true;
+    if (strstr(s_ep_at_buf, "SEND FAIL") != NULL ||
+        strstr(s_ep_at_buf, "ERROR")     != NULL ||
+        strstr(s_ep_at_buf, "FAIL")      != NULL)
+        return false;
+    return (strstr(s_ep_at_buf, "OK") != NULL);
 }
 
 /*============================================================================*/
