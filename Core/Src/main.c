@@ -138,7 +138,6 @@ int main(void)
   MX_CRC_Init();
   /* USER CODE BEGIN 2 */
   UNUSED(MX_SDMMC1_SD_Init);
-  HAL_CRC_DeInit(&hcrc);
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -318,9 +317,9 @@ static void MX_ICACHE_Init(void)
 
   /* USER CODE END ICACHE_Init 1 */
 
-  /** Enable instruction cache in 1-way (direct mapped cache)
+  /** Enable instruction cache in 2-way set-associative mode (better hit rate)
   */
-  if (HAL_ICACHE_ConfigAssociativityMode(ICACHE_1WAY) != HAL_OK)
+  if (HAL_ICACHE_ConfigAssociativityMode(ICACHE_2WAYS) != HAL_OK)
   {
     Error_Handler();
   }

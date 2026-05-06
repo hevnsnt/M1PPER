@@ -332,14 +332,9 @@ void lfrfid_DeInit(void)
 /*============================================================================*/
 void task_suspend_safe(TaskHandle_t xHandle)
 {
-#if 1
-	TaskStatus_t xTaskDetails;
-
-	vTaskGetInfo(xHandle, &xTaskDetails, pdTRUE, eInvalid);
-	if (xTaskDetails.eCurrentState != eSuspended) {
+	if (eTaskGetState(xHandle) != eSuspended) {
 		vTaskSuspend(xHandle);
 	}
-#endif
 }
 
 
@@ -352,14 +347,9 @@ void task_suspend_safe(TaskHandle_t xHandle)
 /*============================================================================*/
 void task_resume_safe(TaskHandle_t xHandle)
 {
-#if 1
-	TaskStatus_t xTaskDetails;
-
-	vTaskGetInfo(xHandle, &xTaskDetails, pdTRUE, eInvalid);
-	if (xTaskDetails.eCurrentState == eSuspended) {
+	if (eTaskGetState(xHandle) == eSuspended) {
 		vTaskResume(xHandle);
 	}
-#endif
 }
 
 

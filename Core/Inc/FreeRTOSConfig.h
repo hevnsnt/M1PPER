@@ -59,13 +59,13 @@ extern uint32_t SystemCoreClock;
 /*-------------------- STM32H5 specific defines -------------------*/
 #define configENABLE_TRUSTZONE                   0
 #define configRUN_FREERTOS_SECURE_ONLY           0
-#define configENABLE_FPU                         0
+#define configENABLE_FPU                         1
 #define configENABLE_MPU                         0
 
 #define configUSE_PREEMPTION                     1
 #define configSUPPORT_STATIC_ALLOCATION          1
 #define configSUPPORT_DYNAMIC_ALLOCATION         1
-#define configUSE_IDLE_HOOK                      0
+#define configUSE_IDLE_HOOK                      1
 #define configUSE_TICK_HOOK                      0
 #define configCPU_CLOCK_HZ                       ( SystemCoreClock )
 #define configTICK_RATE_HZ                       ((TickType_t)1000)
@@ -74,14 +74,14 @@ extern uint32_t SystemCoreClock;
 #define configTOTAL_HEAP_SIZE                    ((size_t)262144)
 #define configSTACK_ALLOCATION_FROM_SEPARATE_HEAP 0
 #define configMAX_TASK_NAME_LEN                  ( 32 )
-#define configUSE_TRACE_FACILITY                 1
+#define configUSE_TRACE_FACILITY                 0
 #define configUSE_16_BIT_TICKS                   0
 #define configUSE_MUTEXES                        1
 #define configQUEUE_REGISTRY_SIZE                8
 #define configUSE_RECURSIVE_MUTEXES              1
 #define configUSE_COUNTING_SEMAPHORES            1
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION  0
-#define configUSE_TICKLESS_IDLE                  2
+#define configUSE_TICKLESS_IDLE                  0
 #define configUSE_TASK_NOTIFICATIONS             1
 #define configHEAP_CLEAR_MEMORY_ON_FREE          0
 #define configUSE_MINI_LIST_ITEM                 1
@@ -109,7 +109,7 @@ extern uint32_t SystemCoreClock;
 
 /* CMSIS-RTOS V2 flags */
 #define configUSE_OS2_THREAD_SUSPEND_RESUME  1
-#define configUSE_OS2_THREAD_ENUMERATE       1
+#define configUSE_OS2_THREAD_ENUMERATE       0
 #define configUSE_OS2_EVENTFLAGS_FROM_ISR    1
 #define configUSE_OS2_THREAD_FLAGS           1
 #define configUSE_OS2_TIMER                  1

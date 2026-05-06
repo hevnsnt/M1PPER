@@ -20,7 +20,7 @@
 #define M1_TASKS_H_
 
 #define M1_TASK_STACK_SIZE_DEFAULT		configMINIMAL_STACK_SIZE // Default 256 32-bit words
-#define M1_TASK_STACK_SIZE_0512			0512 // 32-bit words
+#define M1_TASK_STACK_SIZE_0512			512 // 32-bit words
 #define M1_TASK_STACK_SIZE_1024			1024 // 32-bit words
 #define M1_TASK_STACK_SIZE_2048			2048 // 32-bit words
 #define M1_TASK_STACK_SIZE_3072			3072 // 32-bit words

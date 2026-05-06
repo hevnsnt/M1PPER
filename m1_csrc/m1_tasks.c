@@ -148,11 +148,7 @@ void m1_tasks_init(void)
 /*============================================================================*/
 void vApplicationIdleHook(void)
 {
-	// This should only be called when the M1 is on M1_OPERATION_MODE_DISPLAY_ON
-	// mode to play some screen animation
-	// m1_gui_scr_animation();
-    //xTaskGetIdleTaskHandle();
-    //xTaskGetCurrentTaskHandle();
+	__WFI();
 } // void vApplicationIdleHook(void)
 
 
