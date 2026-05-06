@@ -15,6 +15,8 @@
 #include <stdint.h>
 #include "stm32h5xx_hal.h"
 #include "main.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #include "m1_compile_cfg.h"
 #include "m1_sub_ghz_api.h"
 #include "m1_rf_spi.h"
@@ -38,6 +40,7 @@
 #define SI4463_CTS_TIMEOUT    		12000	// Number of SPI retries to read the CTS ready status
 #define SPI_DUMMY_CMD_DATA			0xFF
 #define SI4463_CTS_READY        	0xFF
+#define SI446X_CTS_FAILED           0x02    /* Returned to caller on CTS recovery failure */
 
 #define SI446X_GROUP_MODEM                          0x20
 #define SI446X_GROUP_MODEM_PROPERTY_MODEM_MOD_TYPE  0x00
@@ -121,6 +124,11 @@ const tRadioConfiguration *RadioConfigList[SUB_GHZ_BAND_EOL] = {
 
 const tRadioConfiguration *pradioconfig = NULL;
 
+/* Phase 7 hook: si446x_nIRQ_active is set by EXTI when the SI4463 nIRQ
+ * line falls (CMD error / RX FIFO full / packet RX'd / etc).  No code
+ * currently reads it — the driver runs the chip in OOK direct-mode where
+ * the FIFO is unused — but keep it so the FSK packet-handler rework
+ * (Phase 7) can subscribe without touching the EXTI plumbing. */
 volatile uint8_t si446x_nIRQ_active = FALSE; // Updated by interrupt
 volatile uint8_t radio_state_flag = RADIO_STATE_IDLE; // Updated by interrupt
 static uint8_t radio_init_done = FALSE;
@@ -272,6 +280,9 @@ void SI446x_Reset(void)
  * Sends a command to the radio chip
  * byteCount:     Number of bytes in the command to send to the radio device
  * pData:         Pointer to the command to send.
+ *
+ * Returns 0 on success, non-zero on CTS-recovery failure (caller should
+ * propagate the error rather than treat it as a transmit success).
  */
 /******************************************************************************/
 uint8_t SI446x_Send_Cmd(uint8_t byteCount, uint8_t *pData)
@@ -283,14 +294,23 @@ uint8_t SI446x_Send_Cmd(uint8_t byteCount, uint8_t *pData)
         //SI446x_Poll_CTS();
         if (SI446x_Get_Resp(0, NULL) != SI4463_CTS_READY )
         {
-        	HAL_Delay(50); // 15
-        	reset_cnt++;
+            /* Non-blocking yield while waiting for SI4463 CTS.  HAL_Delay()
+             * spins at full task priority for up to 7 * 50 = 350 ms — long
+             * enough to starve LCD/USB/SD on a single misbehaving radio
+             * command.  vTaskDelay yields to the scheduler instead.  Fall
+             * back to HAL_Delay if the scheduler is not yet started. */
+            if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
+                vTaskDelay(pdMS_TO_TICKS(50));
+            else
+                HAL_Delay(50);
+            reset_cnt++;
         }
         if (reset_cnt > 6) // 20
         {
         	SI446x_Reset();
         	si446x_got_reset = TRUE;
-        	return 1;
+            /* Surface CTS_FAILED to caller — do not silently consume. */
+        	return SI446X_CTS_FAILED;
         }
     } // while ( !si446x_CTS_ready )
 

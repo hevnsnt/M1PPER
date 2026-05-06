@@ -675,9 +675,27 @@ static void sub_ghz_set_opmode(uint8_t opmode, uint8_t band, uint8_t channel, ui
 	if (retune_freq_hz)
 	{
 		/* Ensure READY state before changing frequency.
-		 * VCO recalibration is automatic on READY→TX/RX transition. */
+		 * VCO recalibration is automatic on READY->TX/RX transition. */
 		SI446x_Change_State(SI446X_CMD_CHANGE_STATE_ARG_NEXT_STATE1_NEW_STATE_ENUM_READY);
 		SI446x_Set_Frequency(retune_freq_hz);
+
+		/* Poll for the chip to actually land in READY before kicking it
+		 * into RX/TX, otherwise the first RSSI sample / first transmitted
+		 * bit comes from a synth that has not finished calibrating.  Bail
+		 * after a short bounded number of polls so a wedged chip does not
+		 * lock the caller up. */
+		for (uint8_t poll = 0; poll < 8U; poll++)
+		{
+			struct si446x_reply_REQUEST_DEVICE_STATE_map *st =
+				SI446x_Request_DeviceState();
+			if (st == NULL) break;
+			uint8_t cur = st->CURR_STATE & 0x0FU;
+			if (cur == 0x03U /* READY */ ||
+				cur == 0x07U /* RX */    ||
+				cur == 0x08U /* TX */)
+				break;
+			HAL_Delay(1);
+		}
 	}
 
 	M1_LOG_D(M1_LOGDB_TAG, "Rx_Tx mode %d band %d channel %d\r\n", opmode, band, channel);
@@ -3848,8 +3866,18 @@ static void sub_ghz_tx_raw_init(void)
 	/*  Clock Configuration for TIMER */
 	SUBGHZ_TX_TIMER_CLK();
 
-	/* Timer Clock: 1MHz (1us per tick) — matches sample durations in .sgh files */
-	tim_prescaler_val = (uint32_t) (HAL_RCC_GetPCLK2Freq() / 1000000) - 1;
+	/* Timer Clock: 1 MHz (1 us per tick) — matches sample durations in
+	 * .sgh files.  Same H5 derivation as the RX timer: TIM kernel clock is
+	 * APB2 when the APB2 prescaler is 1, otherwise 2 * APB2.  Trust the HAL
+	 * helper rather than a constant so SYSCLK can move (75 -> 250 MHz)
+	 * without bricking TX timing. */
+	{
+		uint32_t apb2_freq = HAL_RCC_GetPCLK2Freq();
+		uint32_t pclk2_div = (RCC->CFGR2 & RCC_CFGR2_PPRE2) >> RCC_CFGR2_PPRE2_Pos;
+		uint32_t tim_kernel_hz = (pclk2_div < 4U) ? apb2_freq : (apb2_freq * 2U);
+		if (tim_kernel_hz < 1000000UL) tim_kernel_hz = 1000000UL;
+		tim_prescaler_val = (tim_kernel_hz / 1000000UL) - 1U;
+	}
 
 	timerhdl_subghz_tx.Instance = SUBGHZ_TX_CARRIER_TIMER;
 	timerhdl_subghz_tx.Init.Prescaler = tim_prescaler_val;
