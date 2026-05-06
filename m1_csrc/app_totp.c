@@ -74,6 +74,13 @@ typedef struct
 static totp_account_t s_accounts[TOTP_MAX_ACCOUNTS];
 static uint8_t        s_account_count = 0U;
 
+/* HOTP counter writes are buffered: the runtime updates the in-RAM
+ * counter on every OK press and `s_hotp_dirty` is set to true. The
+ * single-file rewrite (FA_CREATE_ALWAYS) only happens on BACK or app
+ * exit. Pre-merge behavior wrote the file on every OK press, which
+ * burned through SD-card erase cycles and stalled the UI. */
+static bool           s_hotp_dirty   = false;
+
 /* Default Unix epoch baseline (2024-01-01 00:00:00 UTC) used when the RTC
  * year is below 2024 — the firmware default is 2024, so this is just a sane
  * floor while the user has no real time set. */
@@ -727,7 +734,7 @@ void app_totp_run(void)
         {
             break;
         }
-        else if (btn.event[BUTTON_UP_KP_ID] == BUTTON_EVENT_CLICK)
+        if (btn.event[BUTTON_UP_KP_ID] == BUTTON_EVENT_CLICK)
         {
             sel = (sel == 0U) ? (uint8_t)(s_account_count - 1U) : (uint8_t)(sel - 1U);
             redraw = true;
@@ -743,13 +750,23 @@ void app_totp_run(void)
             if (acc->is_hotp)
             {
                 acc->counter++;
-                totp_save_hotp_counters();
+                /* Defer the SD write — flushed on BACK or app exit. See
+                 * `s_hotp_dirty` declaration for rationale. */
+                s_hotp_dirty = true;
                 redraw = true;
             }
             /* TOTP OK is reserved for "copy" but we have no clipboard, so
              * just visually flash by forcing a redraw. */
             redraw = true;
         }
+    }
+
+    /* Flush buffered HOTP counters now that the user is leaving the
+     * app — much cheaper than rewriting the whole file on every OK. */
+    if (s_hotp_dirty)
+    {
+        totp_save_hotp_counters();
+        s_hotp_dirty = false;
     }
 
     if (main_q_hdl != NULL)

@@ -65,11 +65,17 @@ typedef struct {
 } app_list_entry_t;
 
 typedef struct {
-    elf_app_t elf;
-    TaskHandle_t task_handle;
-    TaskHandle_t caller_handle;
-    volatile bool running;
+    elf_app_t          elf;
+    TaskHandle_t       task_handle;
+    TaskHandle_t       caller_handle;
+    volatile bool      running;
+    volatile bool      cancel_requested;  /* set by manager to ask app to bail */
 } app_run_ctx_t;
+
+/* How long to wait for a cooperative app to clean up before we resort
+ * to a hard vTaskDelete. */
+#define APP_CANCEL_TIMEOUT_MS    500U
+#define APP_CANCEL_POLL_MS        20U
 
 /***************************** V A R I A B L E S ******************************/
 
@@ -551,16 +557,28 @@ static elf_load_status_t apps_run(const char *path)
         if (!s_run_ctx.running)
             break;
 
-        /* Check if BACK button was pressed (force kill) */
+        /* Check if BACK button was pressed: ask the app to clean up
+         * cooperatively, then fall back to hard-kill if it doesn't
+         * respond within APP_CANCEL_TIMEOUT_MS. */
         if (m1_button_pressed_check(BUTTON_BACK_KP_ID))
         {
-            M1_LOG_W(TAG, "Force-killing app task");
-            s_run_ctx.running = false;
+            M1_LOG_W(TAG, "Cancel requested for app");
+            s_run_ctx.cancel_requested = true;
 
-            if (s_run_ctx.task_handle != NULL)
+            uint32_t waited = 0U;
+            while (s_run_ctx.running && waited < APP_CANCEL_TIMEOUT_MS)
             {
+                vTaskDelay(pdMS_TO_TICKS(APP_CANCEL_POLL_MS));
+                waited += APP_CANCEL_POLL_MS;
+            }
+
+            if (s_run_ctx.running && s_run_ctx.task_handle != NULL)
+            {
+                M1_LOG_W(TAG, "App did not exit in %lums; hard-killing",
+                         (unsigned long)APP_CANCEL_TIMEOUT_MS);
                 vTaskDelete(s_run_ctx.task_handle);
                 s_run_ctx.task_handle = NULL;
+                s_run_ctx.running     = false;
             }
             break;
         }
@@ -570,8 +588,29 @@ static elf_load_status_t apps_run(const char *path)
     s_run_ctx.task_handle = NULL;
     elf_unload_app(&s_run_ctx.elf);
 
-    /* Drain any stale button events */
-    xQueueReset(main_q_hdl);
+    /* Selectively drain KEYPAD events only — `xQueueReset(main_q_hdl)`
+     * used to nuke pending AT, USB and BACK events for the rest of the
+     * firmware. We instead pull until the queue has no more KEYPAD
+     * frames and re-post anything else. */
+    {
+        S_M1_Main_Q_t evt;
+        S_M1_Buttons_Status btn;
+        uint16_t safety = 32U;
+        while (safety-- && xQueueReceive(main_q_hdl, &evt, 0) == pdTRUE)
+        {
+            if (evt.q_evt_type == Q_EVENT_KEYPAD)
+            {
+                /* Drain the matching button event without dispatching. */
+                (void)xQueueReceive(button_events_q_hdl, &btn, 0);
+            }
+            else
+            {
+                /* Re-queue at the back so other consumers still see it. */
+                (void)xQueueSendToBack(main_q_hdl, &evt, 0);
+                break;
+            }
+        }
+    }
 
     M1_LOG_I(TAG, "App finished, heap=%lu",
              (unsigned long)xPortGetFreeHeapSize());
@@ -583,9 +622,11 @@ static elf_load_status_t apps_run(const char *path)
 /*============================================================================*/
 /*
  * @brief  Browse and run apps from SD card. Called as a menu sub_func.
+ *         Renamed from `game_apps_browser_run` (the legacy name remains
+ *         as a thin alias below for menu wiring).
  */
 /*============================================================================*/
-void game_apps_browser_run(void)
+void m1_app_browser_run(void)
 {
     S_M1_Buttons_Status this_button_status;
     S_M1_Main_Q_t q_item;
@@ -697,4 +738,11 @@ void game_apps_browser_run(void)
             apps_draw_list("Apps", count, selection);
         }
     }
+}
+
+
+/* Backward-compat alias for the legacy menu wiring. */
+void game_apps_browser_run(void)
+{
+    m1_app_browser_run();
 }

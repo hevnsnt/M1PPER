@@ -19,7 +19,12 @@
 /* Initialize the app manager (call once at startup) */
 void m1_app_manager_init(void);
 
-/* Browse and run apps from SD card — called as menu sub_func */
+/* Browse and run apps from SD card — called as menu sub_func. */
+void m1_app_browser_run(void);
+
+/* Backward-compat alias. The original name was misleading because the
+ * browser handles `.m1app` files, not games. New code should call
+ * `m1_app_browser_run` directly. */
 void game_apps_browser_run(void);
 
 #endif /* M1_APP_MANAGER_H_ */
