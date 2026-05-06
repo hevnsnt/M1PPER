@@ -52,8 +52,8 @@
 #define EP_PRESET_COUNT          5
 #define EP_CHANNEL_DEFAULT       6
 
-#define EP_AT_BUF_SIZE           1024
-#define EP_HTTP_REQ_MAX          768
+#define EP_AT_BUF_SIZE           4096   /* Was 1024; bumped for >900B POSTs and IPD blobs */
+#define EP_HTTP_REQ_MAX          3072   /* Bumped to match AT buf */
 #define EP_FIELD_MAX             96
 
 #define EP_MAX_CRED_LOG          16
