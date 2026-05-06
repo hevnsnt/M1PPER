@@ -129,11 +129,19 @@ ls build/M1_T-1000_v*_wCRC.bin   # CRC-injected, ready to flash
 
 ## SD Card Setup
 
-The M1 requires a FAT32-formatted microSD card for most features. SDHC cards up to 32 GB work reliably.
+Most M1PPER features require a FAT32-formatted microSD card. SDHC cards up to 32 GB work reliably. SDXC cards (>32 GB) default to exFAT and must be reformatted — the M1 will not mount them otherwise.
 
-Format the card as FAT32 (not exFAT). On Windows: right-click the card in Explorer, Format, FAT32. On Linux: `mkfs.fat -F 32 /dev/sdX`.
+**Format commands:**
 
-M1PPER creates its own directory structure on first use. See [SD Card Layout](sd-card.md) for the full tree.
+```bash
+# Windows (built-in, works up to 32 GB)
+# Right-click the drive in Explorer > Format > FAT32
+
+# Linux
+mkfs.fat -F 32 /dev/sdX
+```
+
+M1PPER creates all necessary directories (`BadUSB/`, `NFC/`, `SubGHz/`, etc.) on first use. No manual setup required beyond formatting. Full directory tree and file format specs: [SD Card Layout](sd-card.md).
 
 ---
 
@@ -151,6 +159,12 @@ The MD5 file must be exactly 32 bytes of uppercase hex with no trailing newline.
 
 ## Versioning
 
-The M1 displays its version as `v0.8.0.0-C3.X` on the Dual Boot screen. The four-digit prefix (`v0.8.0.0`) is Monstatek's base firmware version and is never changed. The `-C3.X` suffix is the M1PPER community fork revision. These are independent version spaces.
+Three version numbers coexist in M1PPER, each tracking something different:
 
-The `_wCRC.bin` filename uses the M1PPER artifact version (`M1_T-1000_vX.X.X`) which tracks the repository release, separate from both numbering schemes above.
+| Version          | Example            | What it tracks                                                    |
+| ---------------- | ------------------ | ----------------------------------------------------------------- |
+| Monstatek base   | `v0.8.0.0`         | Upstream Monstatek firmware compatibility. Fixed — do not change. |
+| C3 revision      | `-C3.6`            | M1PPER community fork revision. Displayed after the base version. |
+| Artifact version | `M1_T-1000_v0.1.2` | Repository release tag. Used in the binary filename.              |
+
+The on-device display shows `v0.8.0.0-C3.6`. The binary you flash is named `M1_T-1000_v0.1.2_wCRC.bin`. These numbers are independent — a new artifact release does not imply a new C3 revision and vice versa.

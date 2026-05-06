@@ -194,7 +194,15 @@ Format: `FamilyName:16HexChars` (8 bytes = family + 6-byte serial + CRC).
 
 ### Settings (`/settings.ini`)
 
-Auto-managed by M1PPER. Do not edit manually unless you know the key names.
+Written and read by M1PPER on every boot. Manual edits are safe as long as keys and section names match exactly.
+
+Known keys:
+
+| Section     | Key          | Values | Description                                                       |
+| ----------- | ------------ | ------ | ----------------------------------------------------------------- |
+| `[display]` | `brightness` | 0–100  | LCD backlight level                                               |
+| `[display]` | `southpaw`   | 0 or 1 | Mirror button layout for left-handed use                          |
+| `[system]`  | `boot_bank`  | 0 or 1 | Active flash bank (managed by bootloader, do not change manually) |
 
 ```ini
 [display]
@@ -209,7 +217,7 @@ boot_bank=0
 
 ### WiFi Credentials (`/WiFi/wifi_cred.ini`)
 
-AES-encrypted. Managed by M1PPER through the Saved Networks UI. Not directly editable.
+AES-encrypted. The encryption key is derived from device-specific data — credentials saved on one M1 will not decrypt on another. Manage saved networks through System > Saved Networks. The raw file is not user-editable.
 
 ---
 

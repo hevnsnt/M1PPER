@@ -32,7 +32,7 @@ The Monstatek M1 is a pocket-sized multi-protocol security research tool. Every 
 | Interface  | SPI                 |
 | Library    | u8g2                |
 
-The display uses a page-rendering model. All UI code calls `m1_u8g2_firstpage()`, draws with standard u8g2 functions, then loops until `m1_u8g2_nextpage()` returns 0.
+The ST7586s uses a page-rendering model: the 128x64 frame buffer is too large to hold in a single draw call, so u8g2 renders it in horizontal strips. All M1PPER UI code follows the same loop: call `m1_u8g2_firstpage()`, draw the full frame with standard u8g2 calls, then repeat until `m1_u8g2_nextpage()` returns 0. Drawing outside this loop has no effect.
 
 ---
 
@@ -148,8 +148,12 @@ The M1 is USB-powered. Settings, signal files, and credentials are persisted to 
 
 ---
 
-## Schematic Notes
+## Implementation Notes
 
-- STM32H5 uses `FLASH->NSSR` (not `FLASH->SR`) for flash status. BSY bit is `FLASH_SR_BSY`.
-- SPI Mode 1 (CPOL=0, CPHA=1) hardcoded in `m1_esp32_hal.c`.
-- Si4463 CTS function is on a GPIO pin, not the SPI MISO line (`M1_APP_RADIO_POLL_CTS_ON_GPIO`).
+Non-obvious hardware behaviors that affect firmware development.
+
+**Flash status register:** The STM32H5 family uses `FLASH->NSSR` rather than `FLASH->SR` for non-secure flash status. The BSY bit is `FLASH_SR_BSY`. Code ported from STM32F/L/G families that polls `FLASH->SR` will appear to succeed but silently skip the busy wait.
+
+**ESP32-C6 SPI mode:** The M1 hardcodes SPI Mode 1 (CPOL=0, CPHA=1) in `m1_esp32_hal.c`. The ESP32-C6 SPI AT firmware must be built with matching `CONFIG_SPI_MODE=1`. Espressif's prebuilt AT binaries are UART-based and are incompatible with the M1's SPI wiring.
+
+**Si4463 CTS signaling:** The Si4463's Clear-To-Send line is wired to a dedicated GPIO pin, not to the SPI MISO line. The driver polls this GPIO (`M1_APP_RADIO_POLL_CTS_ON_GPIO`) rather than reading CTS from the SPI bus. Disabling this define will cause the driver to hang waiting for a CTS response that never arrives on SPI.

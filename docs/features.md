@@ -186,45 +186,51 @@ Read public data from contactless Visa, Mastercard, and Amex payment cards.
 
 ## 125 kHz RFID
 
+Discrete analog front-end with STM32 timer capture. ASK/PSK demodulation in firmware.
+
+Supported protocols: HID Generic, HID 26-bit, HID 35-bit, HID 37-bit, Indala, AWID, Pyramid, Paradox, IOProx, FDX-A, FDX-B, Viking, Electra, Gallagher, Jablotron, PAC/Stanley, Keri, EM4100, EM410x, and more.
+
 ### Read
 
-Decode incoming RFID transmissions. Supports 20+ protocols. Displays protocol, format, and ID.
+Hold the M1 near a tag or card. Displays protocol, facility code, card number, and raw bit string. Save to `.rfid` file.
 
 ### Write
 
-Clone a read tag to a T5577 blank card.
+Write a captured or manually entered ID to a T5577 blank. Sets the T5577 configuration block to match the source protocol's modulation, bit rate, and carrier settings. Verify pass/fail displayed after write.
 
 ### Erase
 
-Reset a T5577 card to factory state.
+Wipe a T5577: clears the configuration block and all data pages to default (all-zero config, 0xFF data). Useful before re-writing a card to a different protocol.
 
 ### Tag Info
 
-Read and display T5577 configuration block.
+Read and display the raw T5577 configuration block: modulation type, bit rate, RF divide ratio, and PSK carrier frequency settings. Useful for diagnosing read failures on unusual tags.
 
 ### RFID Fuzzer
 
-Iterate through ID spaces for a selected protocol.
+Increment through an ID space for a selected protocol. Configure start ID, end ID, and inter-transmission delay. Useful for access control research on fixed-code systems.
 
 ### Saved
 
-Browse and manage `.rfid` files on the SD card.
+Browse, load, and delete `.rfid` files from the SD card.
 
 ---
 
 ## Infrared
 
+TSOP38238 receiver for capture. IR LED transmitter supports all common carriers: 36 kHz (RC-5, Kaseikyo), 38 kHz (NEC), 40 kHz (Sony SIRC), 56 kHz (RCMM).
+
 ### Learn
 
-Capture any IR signal from any remote using the TSOP38238 receiver.
+Point any IR remote at the M1 and press a button. Captures the raw timing, identifies the protocol if recognized (NEC, Samsung32, RC-5, Kaseikyo, SIRC, RCMM), and saves to `/IR/Learned/`. Learn mode stays active for multi-button capture.
 
 ### Replay
 
-Retransmit saved IR signals. Supports Flipper Zero `.ir` format.
+Retransmit any saved `.ir` file. Supports both M1PPER-captured and Flipper Zero `.ir` format (RAW and protocol variants).
 
 ### Universal Remote
 
-Built-in database of pre-coded remotes for common devices.
+Pre-loaded IR database organized by device category: TV (LG, Samsung, Sony, Philips, Panasonic, Sharp, Toshiba, Hisense, TCL, Vizio), Audio (Bose, Denon, Samsung Soundbar), Projector, Fan. Power, volume, input, and mute codes included per device.
 
 ### TV-B-Gone
 
@@ -425,25 +431,29 @@ DuckyScript 2.0 interpreter over USB HID.
 
 ## GPIO
 
+Direct control of the M1's external GPIO header for hardware interfacing and debug.
+
 ### GPIO Manual Control
 
-Drive individual GPIO pins high or low.
+Toggle individual pins on the external header high or low. Useful for driving external circuits, triggering test equipment, or verifying pin assignments.
 
 ### 3.3V Power
 
-Enable 3.3V output on the external GPIO header.
+Enable the 3.3V rail on the GPIO header. Use this to power low-current external sensors or modules without a separate supply.
 
 ---
 
 ## Field Detection
 
+Passive carrier-sense modes. No transmission — the M1 listens for reader fields and reports signal strength. Useful for locating readers in walls or ceilings before attempting a read.
+
 ### NFC Field Detector
 
-Detect 13.56 MHz reader fields. Useful for locating hidden access control readers.
+The ST25R3916 monitors for 13.56 MHz carrier energy and displays signal amplitude as a live bar graph. Hold near an access control reader, tap terminal, or POS device to confirm presence and range.
 
 ### RFID Field Detector
 
-Detect 125 kHz reader fields.
+Monitors the 125 kHz analog front-end for carrier energy from LF RFID readers. Displays signal level. Useful for finding HID, EM4100, or Indala readers in field installations.
 
 ---
 
@@ -495,7 +505,7 @@ Built-in utility applications accessible from the Apps menu.
 
 ## Games
 
-Snake, Tetris, T-Rex Runner, Pong, Dice Roll.
+Five games: Snake, Tetris, T-Rex Runner, Pong, Dice Roll.
 
 ---
 
@@ -503,31 +513,27 @@ Snake, Tetris, T-Rex Runner, Pong, Dice Roll.
 
 ### Backlight
 
-Adjust LCD brightness. Persisted to `settings.ini` on SD card.
+Adjust LCD brightness 0–100%. Setting persisted to `[display] brightness` in `settings.ini` on the SD card.
 
 ### LCD & Notifications
 
-Display settings, southpaw mode toggle.
-
-### System Settings
-
-Device configuration.
+Display options including southpaw mode (mirrors the button layout for left-handed use, persisted to `settings.ini`).
 
 ### Firmware Update
 
-Flash new M1PPER firmware from a `_wCRC.bin` file on the SD card.
+OTA-style update from the SD card. Place a `_wCRC.bin` file on the SD card and select it here. The bootloader verifies the embedded CRC32 before committing to the inactive flash bank. On success, switches boot bank and reboots.
 
 ### ESP32 Update
 
-Flash new ESP32-C6 coprocessor firmware from SD card. Requires `factory_ESP32C6-SPI.bin` and `factory_ESP32C6-SPI.md5` in the SD root.
+Flash new ESP32-C6 SPI-AT coprocessor firmware via the STM32's UART ROM bootloader passthrough. Requires `factory_ESP32C6-SPI.bin` and `factory_ESP32C6-SPI.md5` in the SD root. The MD5 must be exactly 32 bytes of uppercase hex with no newline.
 
 ### About
 
-Firmware version string, build date, C3 revision.
+Displays firmware version string (`v0.8.0.0-C3.X`), build date, and C3 revision number.
 
 ### Dual Boot
 
-Shows both flash bank versions with CRC status. Falls back to the last good bank automatically if a bank fails CRC on boot.
+Displays both flash bank versions with CRC32 validation status. On every boot, the bootloader validates both banks and falls back to the last verified good bank if the active bank fails its checksum.
 
 ---
 
