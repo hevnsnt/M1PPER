@@ -28,6 +28,7 @@
 #include "rfal_t2t.h"
 #include "rfal_nfcv.h"
 #include "legacy/mfc_crypto1.h"
+#include "legacy/mfkey32.h"
 
 /*************************** D E F I N E S ************************************/
 #define M1_LOGDB_TAG					"NFC"
@@ -3937,14 +3938,188 @@ void nfc_detect_reader(void)
 			m1_fb_close_file(&f);
 		}
 
-		/* Show result */
-		char result_line[32];
-		snprintf(result_line, sizeof(result_line), "%u nonces saved", (unsigned)captured);
-		m1_message_box(&m1_u8g2,
-			"Detect Reader",
-			result_line,
-			"/NFC/mfkey_nonces.txt",
-			"BACK to return");
+		/* ---------------------------------------------------------- */
+		/* On-device Mfkey32 solver                                   */
+		/* ---------------------------------------------------------- */
+		/* Storage for recovered keys. One entry per (sector, keyType). */
+		typedef struct {
+			uint8_t  sector;
+			uint8_t  keyType;
+			uint8_t  key[6];
+			bool     ok;
+		} recovered_key_t;
+
+		recovered_key_t recovered[MFKEY_MAX_SAMPLES];
+		uint8_t recovered_count = 0;
+		uint8_t solved_count    = 0;
+
+		if (captured >= 2)
+		{
+			/* Group samples by (uid, sector, keyType). For each group
+			 * with at least two samples, run the solver on the first
+			 * two transcripts. */
+			bool used[MFKEY_MAX_SAMPLES] = {false};
+
+			for (uint8_t i = 0; i < captured; i++)
+			{
+				if (used[i]) continue;
+
+				/* Find a partner with the same uid/sector/keyType. */
+				int8_t partner = -1;
+				for (uint8_t j = i + 1; j < captured; j++) {
+					if (used[j]) continue;
+					if (mfkey_samples[i].uid     == mfkey_samples[j].uid &&
+					    mfkey_samples[i].sector  == mfkey_samples[j].sector &&
+					    mfkey_samples[i].keyType == mfkey_samples[j].keyType) {
+						partner = (int8_t)j;
+						break;
+					}
+				}
+				if (partner < 0) continue;
+
+				used[i] = true;
+				used[(uint8_t)partner] = true;
+
+				/* Show progress screen. */
+				{
+					char l1[32], l2[32];
+					snprintf(l1, sizeof(l1), "Sec %u  Key %s",
+					         (unsigned)mfkey_samples[i].sector,
+					         (mfkey_samples[i].keyType == MFC_CMD_AUTH_A) ? "A" : "B");
+					snprintf(l2, sizeof(l2), "%u nonces", (unsigned)captured);
+
+					u8g2_FirstPage(&m1_u8g2);
+					u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+					u8g2_SetFont(&m1_u8g2, M1_DISP_RUN_MENU_FONT_B);
+					u8g2_DrawStr(&m1_u8g2, 2, 12, "Cracking...");
+					u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+					u8g2_DrawStr(&m1_u8g2, 2, 28, l1);
+					u8g2_DrawStr(&m1_u8g2, 2, 40, l2);
+					u8g2_DrawStr(&m1_u8g2, 2, 56, "This may take ~60s");
+					m1_u8g2_nextpage();
+				}
+
+				recovered_key_t *r = &recovered[recovered_count++];
+				r->sector  = mfkey_samples[i].sector;
+				r->keyType = mfkey_samples[i].keyType;
+				memset(r->key, 0, sizeof(r->key));
+
+				r->ok = mfkey32_solve(
+					mfkey_samples[i].uid,
+					mfkey_samples[i].nt,
+					mfkey_samples[i].nr,
+					mfkey_samples[i].ar,
+					mfkey_samples[(uint8_t)partner].nt,
+					mfkey_samples[(uint8_t)partner].nr,
+					mfkey_samples[(uint8_t)partner].ar,
+					r->key);
+
+				if (r->ok) solved_count++;
+			}
+		}
+
+		/* Append recovered keys to /NFC/recovered_keys.txt. */
+		if (recovered_count > 0)
+		{
+			FIL fk;
+			if (m1_fb_open_new_file(&fk, "0:/NFC/recovered_keys.txt") == 0) {
+				char line[64];
+				snprintf(line, sizeof(line),
+					"# sector,keyType,key (hex MSB first)\r\n");
+				m1_fb_write_to_file(&fk, line, strlen(line));
+				for (uint8_t i = 0; i < recovered_count; i++) {
+					if (!recovered[i].ok) continue;
+					snprintf(line, sizeof(line),
+						"%u,%s,%02X%02X%02X%02X%02X%02X\r\n",
+						(unsigned)recovered[i].sector,
+						(recovered[i].keyType == MFC_CMD_AUTH_A) ? "A" : "B",
+						recovered[i].key[0], recovered[i].key[1],
+						recovered[i].key[2], recovered[i].key[3],
+						recovered[i].key[4], recovered[i].key[5]);
+					m1_fb_write_to_file(&fk, line, strlen(line));
+				}
+				m1_fb_close_file(&fk);
+			}
+		}
+
+		/* ---------------------------------------------------------- */
+		/* Results screen — scrollable list of recovered keys         */
+		/* ---------------------------------------------------------- */
+		{
+			#define MFK_RESULT_LINES_PER_SCREEN  4
+			uint8_t scroll = 0;
+			bool redraw = true;
+
+			while (1)
+			{
+				if (redraw)
+				{
+					redraw = false;
+
+					char header[32];
+					snprintf(header, sizeof(header), "%u/%u solved",
+					         (unsigned)solved_count, (unsigned)recovered_count);
+
+					u8g2_FirstPage(&m1_u8g2);
+					u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
+					u8g2_SetFont(&m1_u8g2, M1_DISP_RUN_MENU_FONT_B);
+					u8g2_DrawStr(&m1_u8g2, 2, 10, "Detect Reader");
+					u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+					u8g2_DrawStr(&m1_u8g2, 2, 20, header);
+
+					if (recovered_count == 0) {
+						u8g2_DrawStr(&m1_u8g2, 2, 32, "Need 2+ nonces");
+						u8g2_DrawStr(&m1_u8g2, 2, 42, "for same sector/key");
+						u8g2_DrawStr(&m1_u8g2, 2, 52, "Nonces saved to SD");
+					} else {
+						uint8_t max_scroll = (recovered_count > MFK_RESULT_LINES_PER_SCREEN)
+						    ? (recovered_count - MFK_RESULT_LINES_PER_SCREEN) : 0;
+						if (scroll > max_scroll) scroll = max_scroll;
+
+						for (uint8_t row = 0; row < MFK_RESULT_LINES_PER_SCREEN; row++) {
+							uint8_t idx = scroll + row;
+							if (idx >= recovered_count) break;
+
+							char line[32];
+							if (recovered[idx].ok) {
+								snprintf(line, sizeof(line),
+									"S%u %s:%02X%02X%02X%02X%02X%02X",
+									(unsigned)recovered[idx].sector,
+									(recovered[idx].keyType == MFC_CMD_AUTH_A) ? "A" : "B",
+									recovered[idx].key[0], recovered[idx].key[1],
+									recovered[idx].key[2], recovered[idx].key[3],
+									recovered[idx].key[4], recovered[idx].key[5]);
+							} else {
+								snprintf(line, sizeof(line),
+									"S%u %s: Crack failed",
+									(unsigned)recovered[idx].sector,
+									(recovered[idx].keyType == MFC_CMD_AUTH_A) ? "A" : "B");
+							}
+							u8g2_DrawStr(&m1_u8g2, 2, 32 + row * 8, line);
+						}
+					}
+					m1_u8g2_nextpage();
+				}
+
+				S_M1_Main_Q_t qi;
+				S_M1_Buttons_Status bs2;
+				BaseType_t r2 = xQueueReceive(main_q_hdl, &qi, portMAX_DELAY);
+				if (r2 != pdTRUE) continue;
+				if (qi.q_evt_type != Q_EVENT_KEYPAD) continue;
+				r2 = xQueueReceive(button_events_q_hdl, &bs2, 0);
+				if (r2 != pdTRUE) continue;
+				if (bs2.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK) break;
+				if (bs2.event[BUTTON_OK_KP_ID]   == BUTTON_EVENT_CLICK) break;
+				if (bs2.event[BUTTON_UP_KP_ID]   == BUTTON_EVENT_CLICK && scroll > 0) {
+					scroll--; redraw = true;
+				}
+				if (bs2.event[BUTTON_DOWN_KP_ID] == BUTTON_EVENT_CLICK && recovered_count > MFK_RESULT_LINES_PER_SCREEN) {
+					uint8_t max_scroll = recovered_count - MFK_RESULT_LINES_PER_SCREEN;
+					if (scroll < max_scroll) { scroll++; redraw = true; }
+				}
+			}
+			#undef MFK_RESULT_LINES_PER_SCREEN
+		}
 	}
 	else
 	{

@@ -44,6 +44,7 @@ uint8_t wifi_esp_pmkid_capture(const char *bssid, uint8_t channel);
 uint8_t wifi_esp_karma_start(uint8_t channel);
 uint8_t wifi_esp_karma_stop(void);
 uint8_t wifi_esp_hscap_start(const char *bssid, uint8_t channel, uint16_t deauth_count);
+uint8_t wifi_esp_eapollogoff(const char *bssid, uint8_t channel);
 #endif
 
 #ifdef M1_APP_BADBT_ENABLE

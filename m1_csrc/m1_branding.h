@@ -11,8 +11,8 @@
 #ifndef M1_BRANDING_H_
 #define M1_BRANDING_H_
 
-#define M1_PRODUCT_NAME            "M1 T-1000"
-#define M1_PRODUCT_MARK            "T-1000"
-#define M1_PRODUCT_HOME_SUBTITLE   ""
+#define M1_PRODUCT_NAME            "SecKC M1PPER"
+#define M1_PRODUCT_MARK            "M1PPER"
+#define M1_PRODUCT_HOME_SUBTITLE   "by SecKC"
 
 #endif /* M1_BRANDING_H_ */

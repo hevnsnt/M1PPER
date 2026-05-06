@@ -83,5 +83,8 @@ extern void assert_failed();
 #define M1_APP_RPC_ENABLE              /* Enable RPC protocol for qMonstatek desktop app */
 #define M1_APP_GAMES_ENABLE            /* Enable built-in Games menu */
 #define M1_APP_APPS_ENABLE             /* Enable Apps menu (ELF loader from SD card) */
+#define M1_APP_OMNI_SNIFFER_ENABLE     /* Enable Omni-Sniffer BLE tracker detection */
+#define M1_APP_BLE_SPAM_ENABLE         /* Enable BLE Spam: Apple/Google/Samsung/Windows proximity popups */
+#define M1_APP_SUBGHZ_PLAYLIST_ENABLE  /* Enable SubGHz Playlist: sequential .sub/.sgh file playback */
 
 #endif /* M1_COMPILE_CFG_H_ */

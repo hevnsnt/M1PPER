@@ -6157,3 +6157,454 @@ void sub_ghz_freq_scanner(void)
     xQueueReset(main_q_hdl);
     m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
 }
+
+
+/*============================================================================*/
+/*                                                                            */
+/*  Public hooks for app code that drives the SI4463 edge-capture pipeline    */
+/*  directly (POCSAG decoder, etc.). The ring buffer must be initialised by   */
+/*  the caller before sub_ghz_pulse_capture_arm() is invoked.                 */
+/*                                                                            */
+/*============================================================================*/
+
+void sub_ghz_pulse_capture_arm(void)
+{
+    /* Make sure the ISR will accept new pulses and route them to
+     * subghz_rx_rawdata_rb. */
+    subghz_decenc_ctl.pulse_det_stat = PULSE_DET_ACTIVE;
+    subghz_decenc_ctl.pulse_det_pol  = PULSE_DET_RISING;
+    subghz_record_mode_flag = 1;
+    sub_ghz_rx_init();
+    sub_ghz_rx_start();
+}
+
+void sub_ghz_pulse_capture_disarm(void)
+{
+    sub_ghz_rx_pause();
+    sub_ghz_rx_deinit();
+    subghz_record_mode_flag = 0;
+    subghz_decenc_ctl.pulse_det_stat = PULSE_DET_NORMAL;
+}
+
+
+/*============================================================================*/
+/*                                                                            */
+/*  SUBGHZ REPEATER                                                            */
+/*  Listen on a user-selected frequency, capture incoming OOK/FSK pulses     */
+/*  to RAM, then re-transmit them. Loop forever until BACK is pressed.       */
+/*                                                                            */
+/*============================================================================*/
+
+#define SUBGHZ_REPEATER_CAPTURE_MAX     8192U   /* uint16_t pulse samples */
+#define SUBGHZ_REPEATER_RING_SLOTS      4096U
+#define SUBGHZ_REPEATER_SILENCE_MS      100U
+#define SUBGHZ_REPEATER_MIN_PULSES      8U
+
+static const struct {
+    uint32_t           freq_hz;
+    S_M1_SubGHz_Band   band;
+    const char        *label;
+} sub_ghz_repeater_freqs[] = {
+    { 300000000UL, SUB_GHZ_BAND_300,    "300.000" },
+    { 310000000UL, SUB_GHZ_BAND_310,    "310.000" },
+    { 315000000UL, SUB_GHZ_BAND_315,    "315.000" },
+    { 345000000UL, SUB_GHZ_BAND_345,    "345.000" },
+    { 390000000UL, SUB_GHZ_BAND_390,    "390.000" },
+    { 433920000UL, SUB_GHZ_BAND_433_92, "433.920" },
+    { 868350000UL, SUB_GHZ_BAND_915,    "868.350" },
+    { 915000000UL, SUB_GHZ_BAND_915,    "915.000" }
+};
+#define SUBGHZ_REPEATER_FREQ_COUNT \
+    (sizeof(sub_ghz_repeater_freqs) / sizeof(sub_ghz_repeater_freqs[0]))
+
+static const char *sub_ghz_repeater_mod_labels[3] = { "OOK", "ASK", "FSK" };
+
+/* Picker: returns true if the user confirmed a frequency + modulation. */
+static bool sub_ghz_repeater_pick(uint8_t *p_freq_idx, uint8_t *p_mod_idx)
+{
+    S_M1_Buttons_Status bs;
+    S_M1_Main_Q_t q_item;
+    BaseType_t ret;
+    uint8_t freq_idx = *p_freq_idx;
+    uint8_t mod_idx  = *p_mod_idx;
+    uint8_t row = 0; /* 0 = freq row, 1 = mod row */
+    bool done = false;
+    bool accepted = false;
+
+    while (!done)
+    {
+        u8g2_FirstPage(&m1_u8g2);
+        do {
+            u8g2_SetFont(&m1_u8g2, M1_DISP_RUN_MENU_FONT_B);
+            u8g2_DrawStr(&m1_u8g2, 0, 10, "SubGHz Repeater");
+            u8g2_DrawHLine(&m1_u8g2, 0, 12, 128);
+
+            char fline[28];
+            snprintf(fline, sizeof(fline), "Freq:  %s MHz",
+                     sub_ghz_repeater_freqs[freq_idx].label);
+            u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+            if (row == 0)
+            {
+                u8g2_DrawBox(&m1_u8g2, 0, 18, 128, 12);
+                u8g2_SetDrawColor(&m1_u8g2, 0);
+                u8g2_DrawStr(&m1_u8g2, 2, 28, fline);
+                u8g2_SetDrawColor(&m1_u8g2, 1);
+            }
+            else
+            {
+                u8g2_DrawStr(&m1_u8g2, 2, 28, fline);
+            }
+
+            char mline[28];
+            snprintf(mline, sizeof(mline), "Mod:   %s",
+                     sub_ghz_repeater_mod_labels[mod_idx]);
+            if (row == 1)
+            {
+                u8g2_DrawBox(&m1_u8g2, 0, 34, 128, 12);
+                u8g2_SetDrawColor(&m1_u8g2, 0);
+                u8g2_DrawStr(&m1_u8g2, 2, 44, mline);
+                u8g2_SetDrawColor(&m1_u8g2, 1);
+            }
+            else
+            {
+                u8g2_DrawStr(&m1_u8g2, 2, 44, mline);
+            }
+
+            u8g2_SetFont(&m1_u8g2, M1_DISP_SUB_MENU_FONT_N);
+            u8g2_DrawStr(&m1_u8g2, 0, 56, "L/R:Change UP/DN:Row");
+            u8g2_DrawStr(&m1_u8g2, 0, 64, "OK:Start  BACK:Cancel");
+        } while (u8g2_NextPage(&m1_u8g2));
+
+        ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+        if (ret != pdTRUE) continue;
+        if (q_item.q_evt_type != Q_EVENT_KEYPAD) continue;
+        xQueueReceive(button_events_q_hdl, &bs, 0);
+
+        if (bs.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            done = true;
+        }
+        else if (bs.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            *p_freq_idx = freq_idx;
+            *p_mod_idx = mod_idx;
+            accepted = true;
+            done = true;
+        }
+        else if (bs.event[BUTTON_UP_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            row ^= 1U;
+        }
+        else if (bs.event[BUTTON_DOWN_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            row ^= 1U;
+        }
+        else if (bs.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            if (row == 0)
+                freq_idx = (uint8_t)((freq_idx + 1) % SUBGHZ_REPEATER_FREQ_COUNT);
+            else
+                mod_idx = (uint8_t)((mod_idx + 1) % 3);
+        }
+        else if (bs.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)
+        {
+            if (row == 0)
+            {
+                freq_idx = (uint8_t)((freq_idx + SUBGHZ_REPEATER_FREQ_COUNT - 1)
+                                     % SUBGHZ_REPEATER_FREQ_COUNT);
+            }
+            else
+            {
+                mod_idx = (uint8_t)((mod_idx + 2) % 3);
+            }
+        }
+    }
+
+    xQueueReset(main_q_hdl);
+    return accepted;
+}
+
+typedef enum {
+    REPEATER_STATE_LISTENING = 0,
+    REPEATER_STATE_CAPTURING,
+    REPEATER_STATE_REPLAYING
+} sub_ghz_repeater_state_t;
+
+static void sub_ghz_repeater_draw(uint8_t freq_idx, uint8_t mod_idx,
+                                  sub_ghz_repeater_state_t st,
+                                  uint32_t cycles, uint32_t samples)
+{
+    char l1[24], l2[24], l3[24], l4[24];
+    snprintf(l1, sizeof(l1), "SubGHz Repeater");
+    snprintf(l2, sizeof(l2), "%s MHz %s",
+             sub_ghz_repeater_freqs[freq_idx].label,
+             sub_ghz_repeater_mod_labels[mod_idx]);
+    switch (st)
+    {
+        case REPEATER_STATE_LISTENING:
+            snprintf(l3, sizeof(l3), "Listening...");
+            break;
+        case REPEATER_STATE_CAPTURING:
+            snprintf(l3, sizeof(l3), "Capturing...");
+            break;
+        case REPEATER_STATE_REPLAYING:
+            snprintf(l3, sizeof(l3), "Replaying... cyc %lu",
+                     (unsigned long)cycles);
+            break;
+        default:
+            l3[0] = '\0';
+            break;
+    }
+    snprintf(l4, sizeof(l4), "Cyc:%lu  N:%lu",
+             (unsigned long)cycles, (unsigned long)samples);
+
+    u8g2_FirstPage(&m1_u8g2);
+    do {
+        u8g2_SetFont(&m1_u8g2, M1_DISP_RUN_MENU_FONT_B);
+        u8g2_DrawStr(&m1_u8g2, 0, 10, l1);
+        u8g2_DrawHLine(&m1_u8g2, 0, 12, 128);
+        u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+        u8g2_DrawStr(&m1_u8g2, 0, 24, l2);
+        u8g2_DrawStr(&m1_u8g2, 0, 36, l3);
+        u8g2_DrawStr(&m1_u8g2, 0, 48, l4);
+        u8g2_SetFont(&m1_u8g2, M1_DISP_SUB_MENU_FONT_N);
+        u8g2_DrawStr(&m1_u8g2, 0, 64, "BACK to exit");
+    } while (u8g2_NextPage(&m1_u8g2));
+}
+
+void sub_ghz_repeater(void)
+{
+    S_M1_Buttons_Status bs;
+    S_M1_Main_Q_t q_item;
+    BaseType_t ret;
+    uint8_t freq_idx = 5; /* 433.920 default */
+    uint8_t mod_idx  = 0; /* OOK */
+    uint16_t *capture = NULL;
+    uint16_t *ring_storage = NULL;
+    uint32_t cycles = 0;
+
+    if (!sub_ghz_repeater_pick(&freq_idx, &mod_idx))
+    {
+        m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
+        return;
+    }
+
+    /* Allocate buffers. */
+    capture = (uint16_t *)pvPortMalloc(SUBGHZ_REPEATER_CAPTURE_MAX * sizeof(uint16_t));
+    ring_storage = (uint16_t *)pvPortMalloc(SUBGHZ_REPEATER_RING_SLOTS * sizeof(uint16_t));
+    if (capture == NULL || ring_storage == NULL)
+    {
+        if (capture) vPortFree(capture);
+        if (ring_storage) vPortFree(ring_storage);
+        m1_message_box(&m1_u8g2, "Memory error!",
+                       "Repeater alloc", "failed.", "BACK to exit");
+        m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
+        return;
+    }
+
+    m1_ringbuffer_init(&subghz_rx_rawdata_rb,
+                       (uint8_t *)ring_storage,
+                       SUBGHZ_REPEATER_RING_SLOTS,
+                       sizeof(uint16_t));
+
+    /* Map UI mod selection to driver mod type. ASK is treated like OOK
+     * by the SI4463 direct mode (the modulator is purely amplitude
+     * keying); FSK uses the FSK preset. */
+    S_M1_SubGHz_Band band = sub_ghz_repeater_freqs[freq_idx].band;
+    S_M1_SubGHz_Modulation ui_mod = (S_M1_SubGHz_Modulation)mod_idx;
+    subghz_scan_config.band = band;
+    subghz_scan_config.modulation = ui_mod;
+    subghz_custom_freq_hz = sub_ghz_repeater_freqs[freq_idx].freq_hz;
+
+    menu_sub_ghz_init();
+    sub_ghz_tx_raw_init();
+
+    bool running = true;
+    sub_ghz_repeater_state_t state = REPEATER_STATE_LISTENING;
+    uint32_t capture_count = 0;
+    TickType_t last_sample_tick = xTaskGetTickCount();
+
+    /* Initial RX. */
+    m1_ringbuffer_reset(&subghz_rx_rawdata_rb);
+    sub_ghz_set_opmode(SUB_GHZ_OPMODE_RX, band, 0, 0);
+    SI446x_Change_Modem_OOK_PDTC(SUB_GHZ_433_92_NEW_PDTC);
+    sub_ghz_pulse_capture_arm();
+
+    sub_ghz_repeater_draw(freq_idx, mod_idx, state, cycles, capture_count);
+
+    while (running)
+    {
+        switch (state)
+        {
+            case REPEATER_STATE_LISTENING:
+            case REPEATER_STATE_CAPTURING:
+            {
+                /* Drain ring buffer into our linear capture array. */
+                uint32_t avail = ringbuffer_get_data_slots(&subghz_rx_rawdata_rb);
+                if (avail > 0)
+                {
+                    uint32_t room = SUBGHZ_REPEATER_CAPTURE_MAX - capture_count;
+                    if (room == 0)
+                    {
+                        /* Buffer full - end capture early. */
+                        state = REPEATER_STATE_REPLAYING;
+                        break;
+                    }
+                    uint32_t want = (avail > room) ? room : avail;
+                    if (want > 1024) want = 1024;
+                    uint16_t got = m1_ringbuffer_read(&subghz_rx_rawdata_rb,
+                                                     (uint8_t *)&capture[capture_count],
+                                                     (uint16_t)want);
+                    capture_count += got;
+                    if (got > 0)
+                    {
+                        last_sample_tick = xTaskGetTickCount();
+                        if (state == REPEATER_STATE_LISTENING)
+                        {
+                            state = REPEATER_STATE_CAPTURING;
+                            sub_ghz_repeater_draw(freq_idx, mod_idx,
+                                                  state, cycles, capture_count);
+                        }
+                    }
+                }
+
+                /* Detect end-of-burst silence in CAPTURING state. */
+                if (state == REPEATER_STATE_CAPTURING)
+                {
+                    TickType_t silence = xTaskGetTickCount() - last_sample_tick;
+                    if (silence > pdMS_TO_TICKS(SUBGHZ_REPEATER_SILENCE_MS) &&
+                        capture_count >= SUBGHZ_REPEATER_MIN_PULSES)
+                    {
+                        state = REPEATER_STATE_REPLAYING;
+                        sub_ghz_repeater_draw(freq_idx, mod_idx,
+                                              state, cycles, capture_count);
+                    }
+                }
+                break;
+            }
+
+            case REPEATER_STATE_REPLAYING:
+            {
+                /* Stop RX. */
+                sub_ghz_pulse_capture_disarm();
+
+                /* Make sure we have an even number of samples. */
+                if (capture_count & 1U)
+                {
+                    if (capture_count < SUBGHZ_REPEATER_CAPTURE_MAX)
+                    {
+                        capture[capture_count++] = INTERPACKET_GAP_MIN;
+                    }
+                    else
+                    {
+                        capture_count--;
+                    }
+                }
+
+                /* Switch the radio to TX. */
+                sub_ghz_set_opmode(SUB_GHZ_OPMODE_TX, band, 0,
+                                   tx_power_values[subghz_tx_power_idx]);
+
+                /* Drain any leftover Q_EVENT_SUBGHZ_RX before TX runs. */
+                xQueueReset(main_q_hdl);
+
+                subghz_decenc_ctl.ntx_raw_repeat = 0;
+                subghz_tx_tc_flag = 0;
+                sub_ghz_transmit_raw((uint32_t)capture,
+                                     (uint32_t)&timerhdl_subghz_tx.Instance->ARR,
+                                     capture_count, 0);
+
+                /* Wait for Q_EVENT_SUBGHZ_TX (DMA done) or BACK. */
+                bool tx_done = false;
+                TickType_t tx_started = xTaskGetTickCount();
+                while (!tx_done)
+                {
+                    ret = xQueueReceive(main_q_hdl, &q_item, pdMS_TO_TICKS(50));
+                    if (ret == pdTRUE)
+                    {
+                        if (q_item.q_evt_type == Q_EVENT_SUBGHZ_TX)
+                        {
+                            tx_done = true;
+                        }
+                        else if (q_item.q_evt_type == Q_EVENT_KEYPAD)
+                        {
+                            xQueueReceive(button_events_q_hdl, &bs, 0);
+                            if (bs.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+                            {
+                                running = false;
+                                tx_done = true;
+                            }
+                        }
+                    }
+                    /* Hard timeout safety net (~1 s). */
+                    if ((xTaskGetTickCount() - tx_started) > pdMS_TO_TICKS(1000))
+                        tx_done = true;
+                }
+
+                sub_ghz_raw_tx_stop();
+                cycles++;
+
+                if (running)
+                {
+                    /* Back to RX. */
+                    capture_count = 0;
+                    m1_ringbuffer_reset(&subghz_rx_rawdata_rb);
+                    sub_ghz_set_opmode(SUB_GHZ_OPMODE_RX, band, 0, 0);
+                    SI446x_Change_Modem_OOK_PDTC(SUB_GHZ_433_92_NEW_PDTC);
+                    sub_ghz_pulse_capture_arm();
+                    state = REPEATER_STATE_LISTENING;
+                    last_sample_tick = xTaskGetTickCount();
+                    sub_ghz_repeater_draw(freq_idx, mod_idx,
+                                          state, cycles, capture_count);
+                }
+                break;
+            }
+        }
+
+        /* Periodic display refresh + non-blocking key check while in
+         * LISTENING / CAPTURING. */
+        if (state != REPEATER_STATE_REPLAYING)
+        {
+            ret = xQueueReceive(main_q_hdl, &q_item, pdMS_TO_TICKS(20));
+            if (ret == pdTRUE)
+            {
+                if (q_item.q_evt_type == Q_EVENT_KEYPAD)
+                {
+                    xQueueReceive(button_events_q_hdl, &bs, 0);
+                    if (bs.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK)
+                    {
+                        running = false;
+                    }
+                }
+                /* Q_EVENT_SUBGHZ_RX events just signal that the ring
+                 * buffer has new samples - we drain on next pass. */
+            }
+
+            static TickType_t last_redraw = 0;
+            TickType_t now = xTaskGetTickCount();
+            if ((now - last_redraw) > pdMS_TO_TICKS(150))
+            {
+                sub_ghz_repeater_draw(freq_idx, mod_idx,
+                                      state, cycles, capture_count);
+                last_redraw = now;
+            }
+        }
+    }
+
+    /* Cleanup. */
+    sub_ghz_pulse_capture_disarm();
+    sub_ghz_raw_tx_stop();
+    sub_ghz_tx_raw_deinit();
+    sub_ghz_set_opmode(SUB_GHZ_OPMODE_ISOLATED, SUB_GHZ_BAND_EOL, 0, 0);
+    menu_sub_ghz_exit();
+
+    if (capture) vPortFree(capture);
+    if (ring_storage) vPortFree(ring_storage);
+    /* Leave subghz_rx_rawdata_rb pdata pointing at freed memory; it will
+     * be re-initialised by sub_ghz_ring_buffers_init() the next time the
+     * record/replay path runs. */
+    subghz_rx_rawdata_rb.pdata = NULL;
+
+    xQueueReset(main_q_hdl);
+    m1_app_send_q_message(main_q_hdl, Q_EVENT_MENU_EXIT);
+}

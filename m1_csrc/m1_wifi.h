@@ -47,5 +47,7 @@ void wifi_pmkid_capture(void);
 void wifi_karma_attack(void);
 void wifi_handshake_capture(void);
 void wifi_deauth_flood(void);
+void wifi_wardrive(void);
+void wifi_evil_twin(void);
 
 #endif /* M1_WIFI_H_ */

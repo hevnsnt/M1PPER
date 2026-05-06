@@ -17,6 +17,11 @@
 #define BADUSB_MAX_LINE_LEN       256
 #define BADUSB_DIR                "0:/BadUSB"
 
+/* BadUSB script max variables (DuckyScript 2.0 VAR) */
+#define BADUSB_MAX_VARS      8
+#define BADUSB_VAR_NAME_LEN  16
+#define BADUSB_VAR_VAL_LEN   64
+
 /* BadUSB execution state */
 typedef struct
 {
@@ -25,6 +30,13 @@ typedef struct
     uint16_t total_lines;
     uint16_t default_delay_ms;
     char     last_line[BADUSB_MAX_LINE_LEN];
+
+    /* DuckyScript 2.0 extensions */
+    uint8_t  held_mod;                                   /* HOLD modifier bits  */
+    uint8_t  held_key;                                   /* HOLD key scancode   */
+    uint8_t  var_count;
+    char     var_name[BADUSB_MAX_VARS][BADUSB_VAR_NAME_LEN]; /* $VAR names     */
+    char     var_val [BADUSB_MAX_VARS][BADUSB_VAR_VAL_LEN];  /* string values  */
 } badusb_state_t;
 
 /* Main menu entry point (3-item submenu: Run Script, Payload Library, OS Detect) */

@@ -512,6 +512,9 @@ typedef struct {
 	uint8_t addr[BSSID_STR_SIZE];      /* BLE MAC address string */
 	int rssi;                           /* Signal strength (dBm) */
 	uint8_t addr_type;                  /* Address type (0=public, 1=random) */
+	uint16_t company_id;               /* Manufacturer company ID (AD type 0xFF) */
+	uint16_t service_uuid;             /* First 16-bit service UUID found */
+	uint8_t mfr_sub[2];               /* First 2 data bytes after company_id */
 } ble_scanlist_t;
 
 typedef struct {

@@ -214,6 +214,47 @@ static uint8_t hex_pair_to_byte(const char *hex)
   * @param  max_len: size of name_out buffer
   */
 /******************************************************************************/
+static void ble_parse_adv_ids(const char *hex_data, uint16_t *company_id,
+                               uint16_t *service_uuid, uint8_t mfr_sub[2])
+{
+	size_t hex_len, i;
+	uint8_t ad_len, ad_type;
+
+	*company_id  = 0;
+	*service_uuid = 0;
+	mfr_sub[0] = mfr_sub[1] = 0;
+
+	if (!hex_data || !hex_data[0]) return;
+	hex_len = strlen(hex_data);
+	if (hex_len < 4) return;
+
+	i = 0;
+	while (i + 3 < hex_len) {
+		ad_len  = hex_pair_to_byte(&hex_data[i]);
+		if (ad_len == 0) break;
+		if (i + 2 + (size_t)ad_len * 2 > hex_len) break;
+		ad_type = hex_pair_to_byte(&hex_data[i + 2]);
+
+		if (ad_type == 0xFF && *company_id == 0 && ad_len >= 3) {
+			uint8_t lo = hex_pair_to_byte(&hex_data[i + 4]);
+			uint8_t hi = hex_pair_to_byte(&hex_data[i + 6]);
+			*company_id = ((uint16_t)hi << 8) | lo;
+			if (ad_len >= 4 && i + 10 <= hex_len)
+				mfr_sub[0] = hex_pair_to_byte(&hex_data[i + 8]);
+			if (ad_len >= 5 && i + 12 <= hex_len)
+				mfr_sub[1] = hex_pair_to_byte(&hex_data[i + 10]);
+		}
+
+		if ((ad_type == 0x02 || ad_type == 0x03) && *service_uuid == 0 && ad_len >= 3) {
+			uint8_t lo = hex_pair_to_byte(&hex_data[i + 4]);
+			uint8_t hi = hex_pair_to_byte(&hex_data[i + 6]);
+			*service_uuid = ((uint16_t)hi << 8) | lo;
+		}
+
+		i += 2 + (size_t)ad_len * 2;
+	}
+}
+
 static void ble_parse_adv_name(const char *hex_data, char *name_out, size_t max_len)
 {
 	size_t hex_len;
@@ -387,6 +428,32 @@ uint8_t m1_parse_ble_scan_resp(char *resp, const char *resp_key, ctrl_cmd_t *app
 			out_list[app_resp->u.ble_scan.count].name[SSID_LENGTH - 1] = '\0';
 			out_list[app_resp->u.ble_scan.count].rssi = rssi;
 			out_list[app_resp->u.ble_scan.count].addr_type = addr_type;
+
+			/* Extract company_id / service_uuid from adv_data, fallback to scan_rsp */
+			{
+				uint16_t cid = 0, svc = 0;
+				uint8_t  sub[2] = {0, 0};
+
+				if (field_len >= 4) {
+					char saved = *comma2;
+					*comma2 = '\0';
+					ble_parse_adv_ids(comma1, &cid, &svc, sub);
+					*comma2 = saved;
+				}
+				if (cid == 0 && svc == 0) {
+					size_t srd_len = comma3 - (comma2 + 1);
+					if (srd_len >= 4) {
+						char saved = *comma3;
+						*comma3 = '\0';
+						ble_parse_adv_ids(comma2 + 1, &cid, &svc, sub);
+						*comma3 = saved;
+					}
+				}
+				out_list[app_resp->u.ble_scan.count].company_id  = cid;
+				out_list[app_resp->u.ble_scan.count].service_uuid = svc;
+				out_list[app_resp->u.ble_scan.count].mfr_sub[0]  = sub[0];
+				out_list[app_resp->u.ble_scan.count].mfr_sub[1]  = sub[1];
+			}
 
 			app_resp->u.ble_scan.count++;
 		}

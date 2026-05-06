@@ -126,15 +126,46 @@ S_M1_Menu_t menu_Sub_GHz_AddManually =
     "Add Manually", sub_ghz_add_manually, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
+S_M1_Menu_t menu_Sub_GHz_Repeater =
+{
+    "Repeater", sub_ghz_repeater, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
+S_M1_Menu_t menu_Sub_GHz_POCSAG =
+{
+    "POCSAG", sub_ghz_pocsag, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
+#ifdef M1_APP_SUBGHZ_PLAYLIST_ENABLE
+#include "app_subghz_playlist.h"
+
+S_M1_Menu_t menu_Sub_GHz_Playlist =
+{
+    "Playlist", subghz_playlist_run, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
 S_M1_Menu_t menu_Sub_GHz =
 {
-    "Sub-GHz", NULL, NULL, NULL, 13, 0, menu_m1_icon_wave, NULL,
-    {&menu_Sub_GHz_Record, &menu_Sub_GHz_Saved,
+    "Sub-GHz", NULL, NULL, NULL, 16, 0, menu_m1_icon_wave, NULL,
+    {&menu_Sub_GHz_Record, &menu_Sub_GHz_Saved, &menu_Sub_GHz_Playlist,
      &menu_Sub_GHz_AddManually,
+     &menu_Sub_GHz_Repeater, &menu_Sub_GHz_POCSAG,
      &menu_Sub_GHz_Frequency_Reader, &menu_Sub_GHz_Spectrum, &menu_Sub_GHz_RSSI,
      &menu_Sub_GHz_FreqScanner, &menu_Sub_GHz_JamDetector, &menu_Sub_GHz_JamLog, &menu_Sub_GHz_Weather,
      &menu_Sub_GHz_BruteForce, &menu_Sub_GHz_Regional_Information, &menu_Sub_GHz_Radio_Settings}
 };
+#else
+S_M1_Menu_t menu_Sub_GHz =
+{
+    "Sub-GHz", NULL, NULL, NULL, 15, 0, menu_m1_icon_wave, NULL,
+    {&menu_Sub_GHz_Record, &menu_Sub_GHz_Saved,
+     &menu_Sub_GHz_AddManually,
+     &menu_Sub_GHz_Repeater, &menu_Sub_GHz_POCSAG,
+     &menu_Sub_GHz_Frequency_Reader, &menu_Sub_GHz_Spectrum, &menu_Sub_GHz_RSSI,
+     &menu_Sub_GHz_FreqScanner, &menu_Sub_GHz_JamDetector, &menu_Sub_GHz_JamLog, &menu_Sub_GHz_Weather,
+     &menu_Sub_GHz_BruteForce, &menu_Sub_GHz_Regional_Information, &menu_Sub_GHz_Radio_Settings}
+};
+#endif /* M1_APP_SUBGHZ_PLAYLIST_ENABLE */
 
 /*----------------------------- > 125KHz RFID --------------------------------*/
 
@@ -489,6 +520,8 @@ extern S_M1_Menu_t menu_Wifi_Probe_Sniff;
 extern S_M1_Menu_t menu_Wifi_PMKID_Capture;
 extern S_M1_Menu_t menu_Wifi_Karma;
 extern S_M1_Menu_t menu_Wifi_Handshake_Capture;
+extern S_M1_Menu_t menu_Wifi_Wardrive;
+extern S_M1_Menu_t menu_Wifi_Evil_Twin;
 
 S_M1_Menu_t menu_Wifi_Deauth_Flood =
 {
@@ -520,19 +553,30 @@ S_M1_Menu_t menu_Wifi_Handshake_Capture =
     "HS Capture", wifi_handshake_capture, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
+S_M1_Menu_t menu_Wifi_Wardrive =
+{
+    "Wardrive", wifi_wardrive, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
+S_M1_Menu_t menu_Wifi_Evil_Twin =
+{
+    "Evil Twin", wifi_evil_twin, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
 S_M1_Menu_t menu_Wifi_Offensive_Tools =
 {
     .title = "Offensive Tools",
     .sub_func = menu_wifi_offensive_init,
     .deinit_func = NULL,
     .xkey_handler = NULL,
-    .num_submenu_items = 6,
+    .num_submenu_items = 8,
     .reserved = 0,
     .icon_ptr = NULL,
     .gui_menu_update = NULL,
     .submenu = {&menu_Wifi_Deauth_Flood, &menu_Wifi_Beacon_Spam,
                 &menu_Wifi_Probe_Sniff, &menu_Wifi_PMKID_Capture,
-                &menu_Wifi_Karma, &menu_Wifi_Handshake_Capture}
+                &menu_Wifi_Karma, &menu_Wifi_Handshake_Capture,
+                &menu_Wifi_Wardrive, &menu_Wifi_Evil_Twin}
 };
 #endif /* M1_APP_WIFI_OFFENSIVE_ENABLE */
 
@@ -596,10 +640,44 @@ S_M1_Menu_t menu_Bluetooth_BTName =
     "BT Name", bluetooth_set_badbt_name, NULL, NULL, 0, 0, NULL, NULL, NULL
 };
 
+#ifdef M1_APP_BLE_SPAM_ENABLE
+#include "app_ble_spam.h"
+
+S_M1_Menu_t menu_Bluetooth_BleSpam =
+{
+    "BLE Spam", ble_spam_run, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
+S_M1_Menu_t menu_Bluetooth =
+{
+    "Bluetooth", menu_bluetooth_init, NULL, NULL, 7, 0, menu_m1_icon_bluetooth, NULL,
+    {&menu_Bluetooth_Scan, &menu_Bluetooth_Saved, &menu_Bluetooth_Advertise,
+     &menu_Bluetooth_BadBT, &menu_Bluetooth_BTName,
+     &menu_Bluetooth_BleSpam, &menu_Bluetooth_Info}
+};
+#else /* BLE_SPAM disabled */
 S_M1_Menu_t menu_Bluetooth =
 {
     "Bluetooth", menu_bluetooth_init, NULL, NULL, 6, 0, menu_m1_icon_bluetooth, NULL,
     {&menu_Bluetooth_Scan, &menu_Bluetooth_Saved, &menu_Bluetooth_Advertise, &menu_Bluetooth_BadBT, &menu_Bluetooth_BTName, &menu_Bluetooth_Info}
+};
+#endif /* M1_APP_BLE_SPAM_ENABLE */
+
+#else /* BADBT disabled */
+
+#ifdef M1_APP_BLE_SPAM_ENABLE
+#include "app_ble_spam.h"
+
+S_M1_Menu_t menu_Bluetooth_BleSpam =
+{
+    "BLE Spam", ble_spam_run, NULL, NULL, 0, 0, NULL, NULL, NULL
+};
+
+S_M1_Menu_t menu_Bluetooth =
+{
+    "Bluetooth", menu_bluetooth_init, NULL, NULL, 5, 0, menu_m1_icon_bluetooth, NULL,
+    {&menu_Bluetooth_Scan, &menu_Bluetooth_Saved, &menu_Bluetooth_Advertise,
+     &menu_Bluetooth_BleSpam, &menu_Bluetooth_Info}
 };
 #else
 S_M1_Menu_t menu_Bluetooth =
@@ -607,6 +685,8 @@ S_M1_Menu_t menu_Bluetooth =
     "Bluetooth", menu_bluetooth_init, NULL, NULL, 4, 0, menu_m1_icon_bluetooth, NULL,
     {&menu_Bluetooth_Scan, &menu_Bluetooth_Saved, &menu_Bluetooth_Advertise, &menu_Bluetooth_Info}
 };
+#endif /* M1_APP_BLE_SPAM_ENABLE */
+
 #endif /* M1_APP_BADBT_ENABLE */
 
 #else
@@ -711,6 +791,16 @@ S_M1_Menu_t menu_Apps =
      &menu_ESP32Link, &menu_Clock, &menu_HexViewer, &menu_Apps_Browser}
 };
 #endif /* M1_APP_APPS_ENABLE */
+
+/*------------------------------ > OmniSniffer --------------------------------*/
+#ifdef M1_APP_OMNI_SNIFFER_ENABLE
+#include "app_omni_sniffer.h"
+
+S_M1_Menu_t menu_OmniSniffer =
+{
+    "Omni-Sniffer", app_omni_sniffer_run, NULL, NULL, 0, 0, NULL, NULL, {NULL}
+};
+#endif /* M1_APP_OMNI_SNIFFER_ENABLE */
 
 /***************************** V A R I A B L E S ******************************/
 

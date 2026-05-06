@@ -505,6 +505,113 @@ static bool badusb_parse_line(const char *line)
         return true;
     }
 
+    /* STRINGLN <text> — type string then press ENTER */
+    if (strncmp(line, "STRINGLN ", 9) == 0)
+    {
+        badusb_type_string(line + 9);
+        badusb_send_key(0, KEY_ENTER);
+        return true;
+    }
+
+    /* HOLD <key/modifier> — press and keep held */
+    if (strncmp(line, "HOLD ", 5) == 0)
+    {
+        const char *arg = line + 5;
+        const char *rest = NULL;
+        uint8_t m = badusb_parse_modifier(arg, &rest);
+        if (m) {
+            badusb_state.held_mod |= m;
+        } else {
+            uint8_t k = badusb_parse_key_name(arg);
+            if (k) badusb_state.held_key = k;
+        }
+        hid_report[0] = badusb_state.held_mod;
+        hid_report[2] = badusb_state.held_key;
+        USBD_HID_SendReport(&hUsbDeviceFS, hid_report, sizeof(hid_report));
+        osDelay(BADUSB_KEY_PRESS_MS);
+        return true;
+    }
+
+    /* RELEASE <key/modifier> or RELEASE (no arg = release all held) */
+    if (strcmp(line, "RELEASE") == 0 || strncmp(line, "RELEASE ", 8) == 0)
+    {
+        if (line[7] == '\0' || line[7] == ' ') {
+            /* release all */
+            badusb_state.held_mod = 0;
+            badusb_state.held_key = 0;
+        } else {
+            const char *arg = line + 8;
+            const char *rest = NULL;
+            uint8_t m = badusb_parse_modifier(arg, &rest);
+            if (m) badusb_state.held_mod &= (uint8_t)~m;
+            else {
+                uint8_t k = badusb_parse_key_name(arg);
+                if (k && k == badusb_state.held_key) badusb_state.held_key = 0;
+            }
+        }
+        hid_report[0] = badusb_state.held_mod;
+        hid_report[2] = badusb_state.held_key;
+        USBD_HID_SendReport(&hUsbDeviceFS, hid_report, sizeof(hid_report));
+        osDelay(BADUSB_KEY_RELEASE_MS);
+        return true;
+    }
+
+    /* RANDOM_DELAY <min_ms> <max_ms> */
+    if (strncmp(line, "RANDOM_DELAY ", 13) == 0)
+    {
+        uint32_t lo = 0, hi = 0;
+        sscanf(line + 13, "%lu %lu", &lo, &hi);
+        if (hi < lo) hi = lo;
+        uint32_t range = hi - lo + 1;
+        uint32_t delay = lo + ((uint32_t)rand() % range);
+        if (delay > 0) osDelay(delay);
+        return true;
+    }
+
+    /* VAR $name = value */
+    if (strncmp(line, "VAR ", 4) == 0 && line[4] == '$')
+    {
+        char tmp[BADUSB_MAX_LINE_LEN];
+        strncpy(tmp, line + 5, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        char *eq = strstr(tmp, " = ");
+        if (eq) {
+            *eq = '\0';
+            const char *val = eq + 3;
+            /* find or create slot */
+            int slot = -1;
+            for (int i = 0; i < badusb_state.var_count; i++) {
+                if (strcmp(badusb_state.var_name[i], tmp) == 0) { slot = i; break; }
+            }
+            if (slot < 0 && badusb_state.var_count < BADUSB_MAX_VARS)
+                slot = badusb_state.var_count++;
+            if (slot >= 0) {
+                strncpy(badusb_state.var_name[slot], tmp, BADUSB_VAR_NAME_LEN - 1);
+                strncpy(badusb_state.var_val[slot],  val, BADUSB_VAR_VAL_LEN  - 1);
+            }
+        }
+        return true;
+    }
+
+    /* WAIT_FOR_BUTTON_PRESS — pause until M1 OK button pressed */
+    if (strcmp(line, "WAIT_FOR_BUTTON_PRESS") == 0)
+    {
+        S_M1_Buttons_Status btn;
+        S_M1_Main_Q_t q;
+        while (badusb_state.running) {
+            if (xQueueReceive(main_q_hdl, &q, pdMS_TO_TICKS(200)) == pdTRUE) {
+                if (q.q_evt_type == Q_EVENT_KEYPAD &&
+                    xQueueReceive(button_events_q_hdl, &btn, 0) == pdTRUE) {
+                    if (btn.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK) break;
+                    if (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK) {
+                        badusb_state.running = 0; break;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     /* REPEAT <n> */
     if (strncmp(line, "REPEAT ", 7) == 0)
     {
@@ -602,6 +709,131 @@ static bool badusb_parse_line(const char *line)
     return true;  /* Skip unrecognized lines rather than aborting */
 }
 
+
+/*============================================================================*/
+/**
+  * @brief  Evaluate a simple DuckyScript 2.0 condition string.
+  *         Supports: $VAR == "str", $VAR != "str", TRUE, FALSE
+  */
+/*============================================================================*/
+static bool badusb_eval_cond(const char *cond)
+{
+    if (strcmp(cond, "TRUE") == 0)  return true;
+    if (strcmp(cond, "FALSE") == 0) return false;
+
+    /* $name == "value"  or  $name != "value" */
+    if (cond[0] == '$') {
+        char name[BADUSB_VAR_NAME_LEN];
+        const char *eq_pos  = strstr(cond, " == ");
+        const char *neq_pos = strstr(cond, " != ");
+        const char *op = eq_pos ? eq_pos : neq_pos;
+        if (!op) return false;
+
+        size_t nlen = (size_t)(op - cond) - 1; /* skip leading '$' */
+        if (nlen >= BADUSB_VAR_NAME_LEN) nlen = BADUSB_VAR_NAME_LEN - 1;
+        strncpy(name, cond + 1, nlen);
+        name[nlen] = '\0';
+
+        const char *val = op + 4; /* skip " == " or " != " */
+        /* strip quotes */
+        if (*val == '"') val++;
+        char vbuf[BADUSB_VAR_VAL_LEN];
+        strncpy(vbuf, val, sizeof(vbuf) - 1);
+        vbuf[sizeof(vbuf) - 1] = '\0';
+        size_t vl = strlen(vbuf);
+        if (vl > 0 && vbuf[vl - 1] == '"') vbuf[vl - 1] = '\0';
+
+        for (int i = 0; i < badusb_state.var_count; i++) {
+            if (strcmp(badusb_state.var_name[i], name) == 0) {
+                bool match = (strcmp(badusb_state.var_val[i], vbuf) == 0);
+                return eq_pos ? match : !match;
+            }
+        }
+    }
+    return false;
+}
+
+/*============================================================================*/
+/**
+  * @brief  Advance pointer past a block (IF or WHILE body) in script buffer.
+  *         Handles nesting.  Returns pointer past the END_* keyword line.
+  * @param  p        current position (right after opening IF/WHILE line)
+  * @param  end      end of buffer
+  * @param  open_kw  "IF" or "WHILE"
+  * @param  close_kw "END_IF" or "END_WHILE"
+  */
+/*============================================================================*/
+static const char *badusb_skip_block(const char *p, const char *end,
+                                     const char *open_kw, const char *close_kw)
+{
+    int depth = 1;
+    size_t oklen = strlen(open_kw);
+    size_t cklen = strlen(close_kw);
+
+    while (p < end && depth > 0) {
+        const char *le = p;
+        while (le < end && *le != '\n') le++;
+        size_t ll = (size_t)(le - p);
+        char lbuf[64];
+        if (ll >= sizeof(lbuf)) ll = sizeof(lbuf) - 1;
+        memcpy(lbuf, p, ll);
+        lbuf[ll] = '\0';
+        /* trim CR */
+        if (ll > 0 && lbuf[ll-1] == '\r') lbuf[ll-1] = '\0';
+
+        if (strncmp(lbuf, open_kw, oklen) == 0 &&
+            (lbuf[oklen] == ' ' || lbuf[oklen] == '\0'))
+            depth++;
+        else if (strncmp(lbuf, close_kw, cklen) == 0 &&
+                 (lbuf[cklen] == ' ' || lbuf[cklen] == '\0'))
+            depth--;
+
+        p = le;
+        if (p < end && *p == '\n') p++;
+    }
+    return p;
+}
+
+/*============================================================================*/
+/**
+  * @brief  Substitute $VAR references in-place in a line buffer.
+  */
+/*============================================================================*/
+static void badusb_subst_vars(char *line, size_t bufsz)
+{
+    if (badusb_state.var_count == 0) return;
+
+    char out[BADUSB_MAX_LINE_LEN];
+    const char *src = line;
+    char *dst = out;
+    char *dend = out + bufsz - 1;
+
+    while (*src && dst < dend) {
+        if (*src == '$') {
+            /* find longest matching var name */
+            int best = -1;
+            size_t best_len = 0;
+            for (int i = 0; i < badusb_state.var_count; i++) {
+                size_t nl = strlen(badusb_state.var_name[i]);
+                if (nl > best_len &&
+                    strncmp(src + 1, badusb_state.var_name[i], nl) == 0 &&
+                    !isalnum((unsigned char)src[1 + nl]) && src[1 + nl] != '_') {
+                    best = i; best_len = nl;
+                }
+            }
+            if (best >= 0) {
+                const char *v = badusb_state.var_val[best];
+                while (*v && dst < dend) *dst++ = *v++;
+                src += 1 + best_len;
+                continue;
+            }
+        }
+        *dst++ = *src++;
+    }
+    *dst = '\0';
+    strncpy(line, out, bufsz - 1);
+    line[bufsz - 1] = '\0';
+}
 
 /*============================================================================*/
 /**
@@ -789,6 +1021,126 @@ bool badusb_execute_file(const char *filepath)
                 line_buf[line_len - 1] = '\0';
 
             badusb_state.current_line++;
+
+            /* Substitute $VAR references before dispatch */
+            badusb_subst_vars(line_buf, sizeof(line_buf));
+
+            /* IF (condition) … ELSE … END_IF */
+            if (strncmp(line_buf, "IF ", 3) == 0)
+            {
+                /* Extract condition between parentheses if present */
+                char cond[80];
+                const char *cp = line_buf + 3;
+                if (*cp == '(') {
+                    cp++;
+                    const char *ce = strrchr(cp, ')');
+                    size_t cl = ce ? (size_t)(ce - cp) : strlen(cp);
+                    if (cl >= sizeof(cond)) cl = sizeof(cond) - 1;
+                    strncpy(cond, cp, cl); cond[cl] = '\0';
+                } else {
+                    strncpy(cond, cp, sizeof(cond) - 1); cond[sizeof(cond)-1] = '\0';
+                }
+                if (!badusb_eval_cond(cond)) {
+                    /* false branch: skip to ELSE or END_IF */
+                    const char *np = line_end + (line_end < end && *line_end == '\n' ? 1 : 0);
+                    int depth = 1;
+                    const char *scan = np;
+                    bool hit_else = false;
+                    while (scan < end && depth > 0) {
+                        const char *le2 = scan;
+                        while (le2 < end && *le2 != '\n') le2++;
+                        char lb2[64];
+                        size_t ll2 = (size_t)(le2 - scan);
+                        if (ll2 >= sizeof(lb2)) ll2 = sizeof(lb2)-1;
+                        memcpy(lb2, scan, ll2); lb2[ll2] = '\0';
+                        if (ll2 > 0 && lb2[ll2-1] == '\r') lb2[ll2-1] = '\0';
+                        if (strncmp(lb2, "IF ", 3) == 0) depth++;
+                        else if (strcmp(lb2, "END_IF") == 0 && depth == 1) { depth--; scan = le2 + (le2 < end ? 1 : 0); hit_else = false; break; }
+                        else if (strcmp(lb2, "END_IF") == 0) depth--;
+                        else if (strcmp(lb2, "ELSE") == 0 && depth == 1) { hit_else = true; scan = le2 + (le2 < end ? 1 : 0); break; }
+                        scan = le2;
+                        if (scan < end && *scan == '\n') scan++;
+                    }
+                    (void)hit_else;
+                    p = scan;
+                    continue;
+                }
+                /* true branch: just keep executing until ELSE/END_IF (handled below) */
+                p = line_end;
+                if (p < end && *p == '\n') p++;
+                continue;
+            }
+
+            /* ELSE — skip to END_IF (we only reach here if IF was true) */
+            if (strcmp(line_buf, "ELSE") == 0)
+            {
+                p = badusb_skip_block(
+                    line_end + (line_end < end && *line_end == '\n' ? 1 : 0),
+                    end, "IF", "END_IF");
+                continue;
+            }
+
+            /* END_IF — no-op (we reach here naturally after true branch) */
+            if (strcmp(line_buf, "END_IF") == 0)
+            {
+                p = line_end;
+                if (p < end && *p == '\n') p++;
+                continue;
+            }
+
+            /* WHILE (condition) … END_WHILE — max 1000 iterations guard */
+            if (strncmp(line_buf, "WHILE ", 6) == 0)
+            {
+                char cond[80];
+                const char *cp = line_buf + 6;
+                if (*cp == '(') {
+                    cp++;
+                    const char *ce = strrchr(cp, ')');
+                    size_t cl = ce ? (size_t)(ce - cp) : strlen(cp);
+                    if (cl >= sizeof(cond)) cl = sizeof(cond) - 1;
+                    strncpy(cond, cp, cl); cond[cl] = '\0';
+                } else {
+                    strncpy(cond, cp, sizeof(cond) - 1); cond[sizeof(cond)-1] = '\0';
+                }
+                const char *while_body_start =
+                    line_end + (line_end < end && *line_end == '\n' ? 1 : 0);
+                int iters = 0;
+                while (badusb_eval_cond(cond) && badusb_state.running && iters < 1000)
+                {
+                    iters++;
+                    /* Run until END_WHILE by temporarily letting main loop execute.
+                     * Simple approach: re-enter parse loop for body lines.       */
+                    const char *bp = while_body_start;
+                    while (bp < end && badusb_state.running) {
+                        const char *ble = bp;
+                        while (ble < end && *ble != '\n') ble++;
+                        size_t bll = (size_t)(ble - bp);
+                        char blb[BADUSB_MAX_LINE_LEN];
+                        if (bll >= sizeof(blb)) bll = sizeof(blb)-1;
+                        memcpy(blb, bp, bll); blb[bll] = '\0';
+                        if (bll > 0 && blb[bll-1] == '\r') blb[bll-1] = '\0';
+                        if (strcmp(blb, "END_WHILE") == 0) break;
+                        badusb_subst_vars(blb, sizeof(blb));
+                        badusb_parse_line(blb);
+                        if (badusb_state.default_delay_ms > 0)
+                            osDelay(badusb_state.default_delay_ms);
+                        if (badusb_check_abort()) { badusb_state.running = 0; break; }
+                        bp = ble;
+                        if (bp < end && *bp == '\n') bp++;
+                    }
+                }
+                /* skip past END_WHILE */
+                p = badusb_skip_block(while_body_start, end, "WHILE", "END_WHILE");
+                continue;
+            }
+
+            /* END_WHILE — should not reach here normally */
+            if (strcmp(line_buf, "END_WHILE") == 0)
+            {
+                p = line_end;
+                if (p < end && *p == '\n') p++;
+                continue;
+            }
 
             /* Execute the line */
             badusb_parse_line(line_buf);

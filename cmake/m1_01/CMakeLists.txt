@@ -308,6 +308,7 @@ target_sources(m1_01 INTERFACE
     ../../NFC/NFC_drv/legacy/nfc_listener.c
     ../../NFC/NFC_drv/legacy/nfc_poller.c
     ../../NFC/NFC_drv/legacy/mfc_crypto1.c
+    ../../NFC/NFC_drv/legacy/mfkey32.c
     ../../NFC/NFC_drv/legacy/picopass/picopass_cipher.c
     ../../NFC/NFC_drv/legacy/picopass/picopass_poller.c
     ../../NFC/NFC_drv/legacy/picopass/picopass_listener.c
@@ -507,6 +508,14 @@ target_sources(m1_01 INTERFACE
     ../../m1_csrc/m1_app_api.c
     ../../m1_csrc/m1_app_manager.c
     ../../m1_csrc/m1_field_detect.c
+    # === Omni-Sniffer: BLE tracker detection ===
+    ../../m1_csrc/app_omni_sniffer.c
+    # === BLE Spam: Apple/Google/Samsung/Windows proximity popups ===
+    ../../m1_csrc/app_ble_spam.c
+    # === SubGHz Playlist: sequential .sub/.sgh file playback ===
+    ../../m1_csrc/app_subghz_playlist.c
+    # === POCSAG pager decoder ===
+    ../../m1_csrc/app_pocsag.c
 )
 
 target_link_directories(m1_01 INTERFACE

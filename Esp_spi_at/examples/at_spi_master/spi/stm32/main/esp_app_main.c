@@ -2136,4 +2136,17 @@ uint8_t wifi_esp_hscap_start(const char *bssid, uint8_t channel, uint16_t deauth
 	return wifi_esp_run_simple_cmd(cmd, 35, resp, sizeof(resp));
 }
 
+uint8_t wifi_esp_eapollogoff(const char *bssid, uint8_t channel)
+{
+	char cmd[96];
+	char resp[256];
+
+	if (bssid == NULL || bssid[0] == '\0' || channel < 1U || channel > 14U)
+		return ERROR;
+
+	snprintf(cmd, sizeof(cmd), "%s\"%s\",%u\r\n",
+	         ESP32C6_AT_REQ_EAPOLLOGOFF, bssid, channel);
+	return wifi_esp_run_simple_cmd(cmd, 10, resp, sizeof(resp));
+}
+
 #endif /* M1_APP_WIFI_OFFENSIVE_ENABLE */

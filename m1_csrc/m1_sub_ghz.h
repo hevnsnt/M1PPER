@@ -157,6 +157,17 @@ void sub_ghz_saved(void);
 void sub_ghz_add_manually(void);
 uint8_t sub_ghz_replay_flipper_file(const char *sub_path);
 
+/* New apps. */
+void sub_ghz_pocsag(void);
+void sub_ghz_repeater(void);
+
+/* Public hooks for app code that wants to drive the SI4463 edge-capture
+ * pipeline (TIM1 input capture, ring buffer fill) directly.  The ring
+ * buffer must be initialised by the caller before sub_ghz_pulse_capture_arm()
+ * is invoked. */
+void sub_ghz_pulse_capture_arm(void);
+void sub_ghz_pulse_capture_disarm(void);
+
 extern EXTI_HandleTypeDef 	si4463_exti_hdl;
 extern TIM_HandleTypeDef   	timerhdl_subghz_tx;
 extern TIM_HandleTypeDef   	timerhdl_subghz_rx;

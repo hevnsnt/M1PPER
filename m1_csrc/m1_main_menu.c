@@ -57,6 +57,9 @@ extern S_M1_Menu_t menu_Games;
 #ifdef M1_APP_APPS_ENABLE
 extern S_M1_Menu_t menu_Apps;
 #endif
+#ifdef M1_APP_OMNI_SNIFFER_ENABLE
+extern S_M1_Menu_t menu_OmniSniffer;
+#endif
 
 /***************************** V A R I A B L E S ******************************/
 
@@ -115,7 +118,15 @@ static S_M1_Menu_t menu_Power =
 #define ENT_APPS
 #endif
 
-#define MAIN_MENU_COUNT  (10 + OPT_BADUSB + OPT_GAMES + OPT_APPS)
+#ifdef M1_APP_OMNI_SNIFFER_ENABLE
+#define OPT_OMNI    1
+#define ENT_OMNI    &menu_OmniSniffer,
+#else
+#define OPT_OMNI    0
+#define ENT_OMNI
+#endif
+
+#define MAIN_MENU_COUNT  (10 + OPT_BADUSB + OPT_GAMES + OPT_APPS + OPT_OMNI)
 
 S_M1_Menu_t menu_Main =
 {
@@ -125,6 +136,7 @@ S_M1_Menu_t menu_Main =
      ENT_BADUSB
      ENT_GAMES
      ENT_APPS
+     ENT_OMNI
      &menu_Storage, &menu_Power, &menu_System}
 };
 
