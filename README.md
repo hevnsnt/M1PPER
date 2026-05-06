@@ -94,48 +94,48 @@ The table below shows the full capability gap across Flipper Zero, Monstatek sto
 
 ### IEEE 802.15.4
 
-| Capability               | Flipper Zero | Monstatek Stock |          M1PPER           |
-| ------------------------ | :----------: | :-------------: | :-----------------------: |
-| Zigbee sniffing          |      No      |       No        | **Yes — ESP32-C6 native** |
-| Thread / Matter sniffing |      No      |       No        | **Yes — ESP32-C6 native** |
+| Capability               | Flipper Zero | Monstatek Stock | M1PPER  |
+| ------------------------ | :----------: | :-------------: | :-----: |
+| Zigbee sniffing          |      No      |       No        | **Yes** |
+| Thread / Matter sniffing |      No      |       No        | **Yes** |
 
 No Flipper variant — stock or modified — can sniff Zigbee or Thread without external hardware. The M1 does it from the main menu.
 
 ### WiFi
 
-| Capability                        | Flipper Zero | Monstatek Stock |      M1PPER      |
-| --------------------------------- | :----------: | :-------------: | :--------------: |
-| AP scan / Channel survey          |    Plugin    |       Yes       |       Yes        |
-| Probe sniff                       |    Plugin    |       No        |     **Yes**      |
-| Wardriving (WiGLE CSV output)     |    Plugin    |       No        |     **Yes**      |
-| Deauth flood                      |    Plugin    |       Yes       |       Yes        |
-| PMKID capture                     |    Plugin    |       No        |     **Yes**      |
-| WPA2/WPA3 handshake capture       |    Plugin    |       No        |     **Yes**      |
-| Karma / Evil Twin                 |    Plugin    |       No        |     **Yes**      |
-| Evil Portal (captive portal)      |    Plugin    |       No        | **Yes — native** |
-| EAPOL-Logoff (PMF bypass)         |      No      |       No        |     **Yes**      |
-| ARP scan / Port scan / OUI lookup |      No      |       No        |     **Yes**      |
+| Capability                        | Flipper Zero | Monstatek Stock | M1PPER  |
+| --------------------------------- | :----------: | :-------------: | :-----: |
+| AP scan / Channel survey          |    Plugin    |       Yes       |   Yes   |
+| Probe sniff                       |    Plugin    |       No        | **Yes** |
+| Wardriving (WiGLE CSV output)     |    Plugin    |       No        | **Yes** |
+| Deauth flood                      |    Plugin    |       Yes       |   Yes   |
+| PMKID capture                     |    Plugin    |       No        | **Yes** |
+| WPA2/WPA3 handshake capture       |    Plugin    |       No        | **Yes** |
+| Karma / Evil Twin                 |    Plugin    |       No        | **Yes** |
+| Evil Portal (captive portal)      |    Plugin    |       No        | **Yes** |
+| EAPOL-Logoff (PMF bypass)         |      No      |       No        | **Yes** |
+| ARP scan / Port scan / OUI lookup |      No      |       No        | **Yes** |
 
 ### Bluetooth (BLE 5.3)
 
-| Capability                                        | Flipper Zero | Monstatek Stock |      M1PPER      |
-| ------------------------------------------------- | :----------: | :-------------: | :--------------: |
-| BLE scanner                                       |    Plugin    |       Yes       |       Yes        |
-| GATT browser                                      |      No      |       No        |     **Yes**      |
-| BLE advertisement sniffer                         |      No      |       No        |     **Yes**      |
-| BLE Spam (Apple / Google / Samsung / Microsoft)   |    Plugin    |       No        | **Yes — native** |
-| Bad-BT (wireless keystroke injection via BLE HID) |      No      |       No        |     **Yes**      |
-| BLEPTD tracker detection (55+ device signatures)  |      No      |       No        |     **Yes**      |
-| BLEPTD Confusion Mode                             |      No      |       No        |     **Yes**      |
+| Capability                                        | Flipper Zero | Monstatek Stock | M1PPER  |
+| ------------------------------------------------- | :----------: | :-------------: | :-----: |
+| BLE scanner                                       |    Plugin    |       Yes       |   Yes   |
+| GATT browser                                      |      No      |       No        | **Yes** |
+| BLE advertisement sniffer                         |      No      |       No        | **Yes** |
+| BLE Spam (Apple / Google / Samsung / Microsoft)   |    Plugin    |       No        | **Yes** |
+| Bad-BT (wireless keystroke injection via BLE HID) |      No      |       No        | **Yes** |
+| BLEPTD tracker detection (55+ device signatures)  |      No      |       No        | **Yes** |
+| BLEPTD Confusion Mode                             |      No      |       No        | **Yes** |
 
 ### Tools
 
-| Capability                                | Flipper Zero | Monstatek Stock |          M1PPER          |
-| ----------------------------------------- | :----------: | :-------------: | :----------------------: |
-| BadUSB (DuckyScript 2.0 via USB HID)      |     Yes      |       Yes       |           Yes            |
-| Bad-BT (same scripts, no cable, over BLE) |      No      |       No        |         **Yes**          |
-| TOTP / HOTP authenticator                 |    Plugin    |       No        | **Yes — self-contained** |
-| iButton (Dallas/Maxim 1-Wire)             |     Yes      |       No        |         **Yes**          |
+| Capability                                | Flipper Zero | Monstatek Stock | M1PPER  |
+| ----------------------------------------- | :----------: | :-------------: | :-----: |
+| BadUSB (DuckyScript 2.0 via USB HID)      |     Yes      |       Yes       |   Yes   |
+| Bad-BT (same scripts, no cable, over BLE) |      No      |       No        | **Yes** |
+| TOTP / HOTP authenticator                 |    Plugin    |       No        | **Yes** |
+| iButton (Dallas/Maxim 1-Wire)             |     Yes      |       No        | **Yes** |
 
 ---
 
