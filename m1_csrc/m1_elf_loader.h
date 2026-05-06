@@ -94,15 +94,39 @@ typedef struct {
 #define R_ARM_TARGET1           38  /* same as ABS32 on ARM */
 #define R_ARM_REL32             3
 
-/* M1 App Manifest (embedded in .m1meta section) */
+/* M1 App Manifest (embedded in .m1meta section)
+ *
+ * SECURITY (Phase 5.6): the structure is APPENDABLE — new fields only at the
+ * end. The loader checks `meta->size >= sizeof(m1_app_manifest_t)` so apps
+ * built against an older header (smaller struct) will read 0-initialised
+ * fields for the new tail bytes. Bumping API_VERSION is required when the
+ * loader-side semantics of those fields change.
+ */
 #define M1_APP_MANIFEST_MAGIC   0x4D314150  /* "M1AP" */
 #define M1_APP_API_VERSION      2
+
+/* App permission bitmask — declared by the .m1app at compile time, then
+ * surfaced to the user on first run as a permission prompt (Phase 5.6).
+ *
+ * The granted permission set is persisted per app_id in settings (TBD)
+ * and re-checked on every run. The runtime gates for these permissions
+ * are intentionally still TODOs in this build: the dangerous-API strip
+ * in m1_app_api.c is the active enforcement until the per-app capability
+ * table is wired in. Define them now so the manifest layout is locked. */
+#define M1APP_PERM_USB_HID        (1u << 0)  /* badusb / HID injection */
+#define M1APP_PERM_RADIO_TX       (1u << 1)  /* sub-GHz / IR / NFC TX */
+#define M1APP_PERM_FILE_WRITE     (1u << 2)  /* write outside /apps/<id>/ */
+#define M1APP_PERM_NETWORK        (1u << 3)  /* WiFi scan / connect */
+#define M1APP_PERM_CRYPTO_KEYS    (1u << 4)  /* derive/use firmware keys */
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint16_t api_version;
     uint16_t stack_size;     /* in 32-bit words */
     char     name[32];
+    /* --- v2 extension; tail bytes default to 0 for older apps --- */
+    uint32_t permissions;    /* bitfield of M1APP_PERM_* the app requests */
+    uint8_t  reserved[28];   /* future use; keep zero */
 } m1_app_manifest_t;
 
 /* Loaded section info */

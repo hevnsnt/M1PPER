@@ -140,6 +140,15 @@ void m1_tasks_init(void);
 void vApplicationIdleHook(void);
 void m1_dummy_task(void *argument);
 
+/* Dump every task's stack high-water-mark (worst observed unused depth) to
+ * the debug log.  If out_buf is non-NULL the same listing is also copied
+ * there for CLI consumption.  Returns the total number of bytes the
+ * listing required (may exceed out_size when out_buf is too small).
+ *
+ * Audit 07 finding: stack sizes were uniformly over-provisioned without
+ * measurement; this gives the data for a follow-up sizing pass. */
+size_t m1_perf_dump_task_stacks(char *out_buf, size_t out_size);
+
 extern QueueHandle_t	main_q_hdl;
 extern QueueHandle_t	sdcard_det_q_hdl;
 

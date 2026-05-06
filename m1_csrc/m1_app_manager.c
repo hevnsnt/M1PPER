@@ -458,6 +458,48 @@ static void apps_draw_message(const char *line1, const char *line2)
 
 /*============================================================================*/
 /*
+ * Drop the current thread to UNPRIVILEGED mode.
+ *
+ * SECURITY (audit 06-security #4 / Phase 5.6): when an .m1app's entry()
+ * runs with CONTROL.nPRIV == 0 (privileged) it can:
+ *   - reprogram the MPU,
+ *   - mask/unmask interrupts via MSR PRIMASK,
+ *   - issue arbitrary BX/BLX into firmware,
+ *   - touch system control registers.
+ * Setting CONTROL.nPRIV = 1 here, after the FreeRTOS task has been
+ * created and stack switched to PSP, removes those instructions from
+ * the instruction set the app sees. PRIMASK/BASEPRI/FAULTMASK writes
+ * silently trap (UsageFault). MPU/NVIC writes also trap.
+ *
+ * IMPORTANT: this only blocks the most direct privilege primitives. It
+ * does NOT prevent the app from reading/writing arbitrary memory — the
+ * Cortex-M33 MPU is a separate mechanism and the FreeRTOS port we link
+ * against (ARM_CM33_NTZ) does not save/restore MPU state per task.
+ * Until the project migrates to the ARM_CM33_NTZ_MPU port (tracked as
+ * a follow-up to Phase 5.6 in PLAN.md), full memory-region isolation
+ * is not in effect. The dangerous-API strip in m1_app_api.c is what
+ * prevents apps from issuing peripheral writes; this drop hardens the
+ * remaining attack surface against direct CPU-state manipulation.
+ *
+ * After this call we cannot get back to privileged mode in the same
+ * thread. That's fine: when entry() returns we call vTaskDelete(NULL),
+ * which is an SVC that traps into handler mode and never returns to
+ * thread mode of this task.
+ */
+/*============================================================================*/
+static inline void m1_app_drop_privilege(void)
+{
+    /* Reading CONTROL: we want to keep SPSEL (PSP) unchanged and only
+     * set nPRIV (bit 0). FreeRTOS schedules tasks on PSP so SPSEL is 1. */
+    uint32_t control = __get_CONTROL();
+    control |= 0x1u;       /* nPRIV = 1 -> unprivileged thread */
+    __set_CONTROL(control);
+    __ISB();               /* ensure new privilege takes effect */
+}
+
+
+/*============================================================================*/
+/*
  * @brief  FreeRTOS task wrapper that calls the app's entry point
  * @param  param  Pointer to app_run_ctx_t
  */
@@ -470,9 +512,19 @@ static void app_task_wrapper(void *param)
     M1_LOG_I(TAG, "App task started, entry=0x%08lX",
              (unsigned long)ctx->elf.entry_point);
 
+    /* Drop to unprivileged thread mode before running attacker-controlled
+     * code (Phase 5.6). Must be the LAST thing we do before entry() —
+     * once unprivileged we cannot touch system registers any more. */
+    m1_app_drop_privilege();
+
     /* Call the app's main function */
     int32_t result = entry(NULL);
 
+    /* When entry() returns we are still unprivileged. vTaskDelete is an
+     * SVC instruction (allowed from unprivileged) that traps into
+     * handler mode (always privileged) and never returns. The cleanup
+     * code below runs unprivileged but only calls FreeRTOS API which
+     * is SVC-mediated, so it's still safe. */
     M1_LOG_I(TAG, "App returned %ld", (long)result);
 
     /* Signal the caller that we're done */
@@ -484,7 +536,7 @@ static void app_task_wrapper(void *param)
         xTaskNotifyGive(ctx->caller_handle);
     }
 
-    /* Delete ourselves */
+    /* Delete ourselves (SVC -> handler -> reschedule, never returns) */
     vTaskDelete(NULL);
 }
 

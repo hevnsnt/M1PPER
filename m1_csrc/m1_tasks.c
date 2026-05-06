@@ -14,6 +14,8 @@
 /*************************** I N C L U D E S **********************************/
 
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include "stm32h5xx_hal.h"
 #include "m1_tasks.h"
 #include "m1_sdcard.h"
@@ -23,6 +25,9 @@
 #include "m1_compile_cfg.h"
 #include "m1_menu.h"
 #include "m1_crash_log.h"
+#include "m1_log_debug.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #ifdef M1_APP_RPC_ENABLE
 #include "m1_rpc.h"
 #endif
@@ -242,3 +247,126 @@ void m1_runonce_task_handler(void *param)
 	//m1_led_indicator_on(NULL);
 	vTaskDelete(NULL); // Delete this task
 } // void m1_runonce_task_handler(void *param)
+
+
+
+/*============================================================================*/
+/*
+ * Stack high-water-mark instrumentation.
+ *
+ * audit 07 m1_tasks.c:97-127 — stack sizes were uniformly chosen at
+ * 1024/2048 32-bit words across every task.  subfunc_handler_task is at
+ * 4096 words = 16 KB and is suspected ~4x over-provisioned.  Reduce the
+ * over-provisioning carefully by measuring real usage first.
+ *
+ * uxTaskGetStackHighWaterMark returns "minimum unused words ever observed"
+ * for a task; a low value is danger (close to overflow), a large value is
+ * waste.  Print the table to the debug log (and optionally also to a
+ * caller-supplied buffer for CLI use) so we can iterate stack sizing
+ * without flying blind.
+ *
+ * No stack reductions are committed in this change — the audit
+ * specifically noted "leave stack reduction for a follow-up after
+ * confirmed measurements".
+ */
+/*============================================================================*/
+size_t m1_perf_dump_task_stacks(char *out_buf, size_t out_size)
+{
+    static const char *header = "task                            prio  hwm-words  hwm-bytes\r\n";
+    size_t  total_written = 0;
+    UBaseType_t n_tasks   = uxTaskGetNumberOfTasks();
+    TaskStatus_t *snap    = NULL;
+    UBaseType_t snap_n    = 0;
+    UBaseType_t i;
+    char line[96];
+    int n;
+
+#define APPEND(s, len) do {                                       \
+        if (out_buf && (total_written + (len)) < out_size) {      \
+            memcpy(out_buf + total_written, (s), (len));          \
+            out_buf[total_written + (len)] = '\0';                \
+        }                                                         \
+        total_written += (len);                                   \
+    } while (0)
+
+    M1_LOG_I(M1_LOGDB_TAG, "%s", header);
+    APPEND(header, strlen(header));
+
+    if (n_tasks == 0)
+        return total_written;
+
+    /* uxTaskGetSystemState requires configUSE_TRACE_FACILITY=1; the project
+     * currently has it OFF (FreeRTOSConfig.h:77).  When trace is OFF we fall
+     * back to walking the named handles we know about. */
+#if (configUSE_TRACE_FACILITY == 1)
+    snap = (TaskStatus_t *)pvPortMalloc(sizeof(TaskStatus_t) * n_tasks);
+    if (snap)
+    {
+        snap_n = uxTaskGetSystemState(snap, n_tasks, NULL);
+        for (i = 0; i < snap_n; i++)
+        {
+            n = snprintf(line, sizeof(line),
+                         "%-32s  %3lu  %9lu  %9lu\r\n",
+                         snap[i].pcTaskName,
+                         (unsigned long)snap[i].uxCurrentPriority,
+                         (unsigned long)snap[i].usStackHighWaterMark,
+                         (unsigned long)snap[i].usStackHighWaterMark * 4UL);
+            if (n > 0)
+            {
+                M1_LOG_I(M1_LOGDB_TAG, "%s", line);
+                APPEND(line, (size_t)n);
+            }
+        }
+        vPortFree(snap);
+    }
+#else
+    /* Fallback: enumerate the few known handles we exported externally. */
+    extern TaskHandle_t system_task_hdl;
+    extern TaskHandle_t sdcard_task_hdl;
+    extern TaskHandle_t menu_main_handler_task_hdl;
+    extern TaskHandle_t subfunc_handler_task_hdl;
+    extern TaskHandle_t log_db_task_hdl;
+    extern TaskHandle_t idle_task_hdl;
+    extern TaskHandle_t usb2ser_task_hdl;
+    static TaskHandle_t * const named_tasks[] = {
+        &system_task_hdl,
+        &sdcard_task_hdl,
+        &menu_main_handler_task_hdl,
+        &subfunc_handler_task_hdl,
+        &log_db_task_hdl,
+        &idle_task_hdl,
+        &usb2ser_task_hdl,
+    };
+    static const char * const named_names[] = {
+        "system_periodic_task_n",
+        "sdcard_detection_task_n",
+        "menu_main_handler_task_n",
+        "subfunc_handler_task_n",
+        "log_db_handler_task_n",
+        "idle_handler_task_n",
+        "m1_ser2usb_task_n",
+    };
+    for (i = 0; i < (sizeof(named_tasks) / sizeof(named_tasks[0])); i++)
+    {
+        TaskHandle_t hdl = (named_tasks[i] != NULL) ? *named_tasks[i] : NULL;
+        UBaseType_t hwm   = (hdl != NULL) ? uxTaskGetStackHighWaterMark(hdl) : 0;
+        UBaseType_t prio  = (hdl != NULL) ? uxTaskPriorityGet(hdl) : 0;
+        n = snprintf(line, sizeof(line),
+                     "%-32s  %3lu  %9lu  %9lu\r\n",
+                     named_names[i],
+                     (unsigned long)prio,
+                     (unsigned long)hwm,
+                     (unsigned long)hwm * 4UL);
+        if (n > 0)
+        {
+            M1_LOG_I(M1_LOGDB_TAG, "%s", line);
+            APPEND(line, (size_t)n);
+        }
+    }
+    (void)snap;
+    (void)snap_n;
+#endif /* configUSE_TRACE_FACILITY */
+
+#undef APPEND
+    return total_written;
+}

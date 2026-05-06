@@ -62,7 +62,8 @@ static elf_load_status_t elf_relocate_section(FIL *fp, elf_app_t *app,
                                                uint16_t target_sec_idx,
                                                const m1_api_interface_t *api);
 static void *elf_resolve_symbol(const char *name, const m1_api_interface_t *api);
-static bool elf_apply_relocation(uint8_t *target_base, uint32_t offset,
+static bool elf_apply_relocation(uint8_t *target_base, uint32_t target_size,
+                                  uint32_t offset,
                                   uint8_t rel_type, uint32_t sym_addr,
                                   uint32_t patch_addr);
 
@@ -402,13 +403,23 @@ static elf_load_status_t elf_find_manifest(elf_app_t *app)
 
     meta = &app->sections[app->meta_idx];
 
-    if (meta->data == NULL || meta->size < sizeof(m1_app_manifest_t))
+    /* The manifest is APPENDABLE: new fields tack on at the end. Accept
+     * any size >= the original (pre-Phase-5) v1/v2 head (40 bytes:
+     * magic+api_version+stack_size+name[32]) and zero-fill the tail so
+     * older .m1apps without the permissions field read all-zero, which
+     * means "request no permissions" (the default deny state). */
+    const size_t MANIFEST_HEAD_SIZE = 4u + 2u + 2u + 32u; /* = 40 */
+    if (meta->data == NULL || meta->size < MANIFEST_HEAD_SIZE)
     {
         M1_LOG_E(TAG, ".m1meta too small (%lu)", (unsigned long)meta->size);
         return ELF_ERR_MANIFEST;
     }
 
-    memcpy(&app->manifest, meta->data, sizeof(m1_app_manifest_t));
+    memset(&app->manifest, 0, sizeof(m1_app_manifest_t));
+    size_t copy_len = (meta->size < sizeof(m1_app_manifest_t))
+                      ? (size_t)meta->size
+                      : sizeof(m1_app_manifest_t);
+    memcpy(&app->manifest, meta->data, copy_len);
 
     if (app->manifest.magic != M1_APP_MANIFEST_MAGIC)
     {
@@ -431,8 +442,25 @@ static elf_load_status_t elf_find_manifest(elf_app_t *app)
     if (app->manifest.stack_size > 16384)
         app->manifest.stack_size = 16384;
 
-    M1_LOG_I(TAG, "Manifest: name=\"%s\" api=%u stack=%u words",
-             app->manifest.name, app->manifest.api_version, app->manifest.stack_size);
+    M1_LOG_I(TAG, "Manifest: name=\"%s\" api=%u stack=%u words perms=0x%08lX",
+             app->manifest.name, app->manifest.api_version, app->manifest.stack_size,
+             (unsigned long)app->manifest.permissions);
+
+    /* Phase 5.6: log every permission the app declared.  When the
+     * runtime gates are wired in (follow-up), each gated API will check
+     * app->manifest.permissions and refuse if the bit is missing. For
+     * now this is informational so we know what apps we're shipping
+     * are asking for. */
+    if (app->manifest.permissions & M1APP_PERM_USB_HID)
+        M1_LOG_W(TAG, "  PERM: USB_HID (BadUSB) requested");
+    if (app->manifest.permissions & M1APP_PERM_RADIO_TX)
+        M1_LOG_W(TAG, "  PERM: RADIO_TX requested");
+    if (app->manifest.permissions & M1APP_PERM_FILE_WRITE)
+        M1_LOG_W(TAG, "  PERM: FILE_WRITE (outside /apps/<id>) requested");
+    if (app->manifest.permissions & M1APP_PERM_NETWORK)
+        M1_LOG_W(TAG, "  PERM: NETWORK requested");
+    if (app->manifest.permissions & M1APP_PERM_CRYPTO_KEYS)
+        M1_LOG_W(TAG, "  PERM: CRYPTO_KEYS requested");
 
     return ELF_OK;
 }
@@ -485,10 +513,27 @@ static void *elf_resolve_symbol(const char *name, const m1_api_interface_t *api)
  * @retval bool         true on success
  */
 /*============================================================================*/
-static bool elf_apply_relocation(uint8_t *target_base, uint32_t offset,
+static bool elf_apply_relocation(uint8_t *target_base, uint32_t target_size,
+                                  uint32_t offset,
                                   uint8_t rel_type, uint32_t sym_addr,
                                   uint32_t patch_addr)
 {
+    /* Bounds check the patch site against the target section size.
+     *
+     * SECURITY (audit 05-app-layer #2 / Phase 5.7): without this check a
+     * malicious .m1app could supply a relocation with r_offset >= section
+     * size and overwrite arbitrary memory past the section. Each
+     * relocation type below patches a 32-bit (R_ARM_ABS32, R_ARM_REL32,
+     * R_ARM_TARGET1) or two consecutive 16-bit halfwords (Thumb
+     * encodings), so we conservatively require 4 bytes of room. */
+    if (offset > target_size || target_size - offset < 4)
+    {
+        M1_LOG_E(TAG,
+                 "Relocation OOB: offset 0x%lX + 4 > section size %lu",
+                 (unsigned long)offset, (unsigned long)target_size);
+        return false;
+    }
+
     uint32_t *loc32 = (uint32_t *)(target_base + offset);
 
     switch (rel_type)
@@ -544,12 +589,18 @@ static bool elf_apply_relocation(uint8_t *target_base, uint32_t offset,
             /* Compute new target: S + A - P */
             int32_t new_offset = (int32_t)sym_addr + existing_offset - (int32_t)patch_addr;
 
-            /* Check range: +/- 16MB for Thumb BL/B.W */
+            /* Check range: +/- 16MB for Thumb BL/B.W
+             *
+             * SECURITY (audit 05-app-layer #3 / Phase 5.7): the prior code
+             * silently skipped this case and returned true, leaving the
+             * un-relocated encoding in place. Execution would then jump
+             * to the literal pre-link offset (essentially a wild branch
+             * into firmware text). Now we return false so the caller
+             * fails the load. */
             if (new_offset > 0x00FFFFFF || new_offset < (int32_t)0xFF000000)
             {
-                M1_LOG_W(TAG, "THM_CALL out of range: offset=%ld", (long)new_offset);
-                /* Out of range — cannot patch. Skip without failing. */
-                break;
+                M1_LOG_E(TAG, "THM_CALL out of range: offset=%ld", (long)new_offset);
+                return false;
             }
 
             /* Re-encode */
@@ -798,17 +849,35 @@ static elf_load_status_t elf_relocate_section(FIL *fp, elf_app_t *app,
                 sym_addr = sym->st_value;
             }
         }
+        else
+        {
+            /* Reject SHN_COMMON and any other unhandled st_shndx
+             * (audit 05-app-layer #2 / Phase 5.7). The previous code
+             * silently fell through with sym_addr == 0; the relocation
+             * would then patch the target with addend-only, producing a
+             * wild branch / null deref at runtime. Treat as fatal. */
+            M1_LOG_E(TAG,
+                     "Unhandled st_shndx 0x%X for sym %lu (SHN_COMMON or out-of-table)",
+                     sym->st_shndx, (unsigned long)sym_idx);
+            return ELF_ERR_SYMBOL;
+        }
 
         /* Compute the absolute address of the patch site */
         uint32_t patch_addr = (uint32_t)target_sec->data + rel_entry.r_offset;
 
-        /* Apply the relocation */
-        if (!elf_apply_relocation(target_sec->data, rel_entry.r_offset,
+        /* Apply the relocation. Bounds-check + range-check failures are
+         * fatal — the prior "non-fatal warning" path let an attacker
+         * craft an .m1app whose relocations were silently ignored, then
+         * call into the un-patched code at the pre-link offset. */
+        if (!elf_apply_relocation(target_sec->data, target_sec->size,
+                                   rel_entry.r_offset,
                                    rel_type, sym_addr, patch_addr))
         {
-            /* Non-fatal — some relocation types may be unsupported but non-critical */
-            M1_LOG_W(TAG, "Relocation warning at offset 0x%lX type %u",
-                     (unsigned long)rel_entry.r_offset, rel_type);
+            M1_LOG_E(TAG,
+                     "Relocation FAILED at offset 0x%lX type %u (sec %u, sym %lu)",
+                     (unsigned long)rel_entry.r_offset, rel_type,
+                     target_sec_idx, (unsigned long)sym_idx);
+            return ELF_ERR_FORMAT;
         }
     }
 
@@ -934,6 +1003,24 @@ elf_load_status_t elf_load_app(const char *path, elf_app_t *app,
                         if (sec_idx < app->num_sections &&
                             app->sections[sec_idx].data != NULL)
                         {
+                            /* SECURITY (audit 05-app-layer #4 / Phase 5.8):
+                             * refuse to start an entry point that lives
+                             * in a section without SHF_EXECINSTR. The
+                             * previous code accepted "app_main" defined
+                             * in .data, which is writable and lets a
+                             * malicious .m1app self-modify its code at
+                             * runtime. Enforce a basic W^X by rejecting
+                             * non-EXECINSTR sections here. */
+                            if (!(app->sections[sec_idx].flags & SHF_EXECINSTR))
+                            {
+                                M1_LOG_E(TAG,
+                                         "app_main lives in section %u without SHF_EXECINSTR (flags=0x%lX) — refusing to execute",
+                                         sec_idx,
+                                         (unsigned long)app->sections[sec_idx].flags);
+                                /* Leave entry_point == 0 so the
+                                 * post-loop check below fails the load. */
+                                continue;
+                            }
                             app->entry_point = (uint32_t)app->sections[sec_idx].data +
                                                syms[s].st_value;
                             /* Set Thumb bit for Cortex-M */
