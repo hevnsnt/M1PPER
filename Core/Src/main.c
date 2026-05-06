@@ -117,6 +117,14 @@ int main(void)
    * the boot counter. Must run after HAL_Init (PWR clocks ready) and before
    * peripherals so it doesn't race with anything. Idempotent. */
   m1_crash_log_check_and_log();
+
+  /* Enable the DWT cycle counter for cheap profiling.  Reading DWT->CYCCNT
+   * is one cycle and gives 32-bit core-cycle resolution, wraps every
+   * ~57 sec at 75 MHz / ~17 sec at 250 MHz.  Used by m1_perf_cycles() and
+   * by mfc_rng_u32() (audit 02) for additional entropy. */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0U;
+  DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
   /* USER CODE END Init */
 
   /* Configure the system clock */
