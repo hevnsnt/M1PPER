@@ -399,6 +399,34 @@ static void tpms_log_to_sd(const tpms_sensor_t *s)
  * Protocol decoders
  * ============================================================================ */
 
+/* Generic 8-bit CRC with arbitrary polynomial.  Used to validate decoded
+ * TPMS frames before accepting them; without this any 16-bit sync match in
+ * a 256-chip noise window populates tpms_log.txt with hallucinated sensors. */
+static uint8_t tpms_crc8(const uint8_t *data, uint8_t len, uint8_t poly,
+                         uint8_t init)
+{
+    uint8_t crc = init;
+    for (uint8_t i = 0; i < len; i++)
+    {
+        crc ^= data[i];
+        for (uint8_t b = 0; b < 8U; b++)
+        {
+            crc = (crc & 0x80U) ? (uint8_t)((crc << 1) ^ poly) : (uint8_t)(crc << 1);
+        }
+    }
+    return crc;
+}
+
+/* Reject decoded frames whose pressure or temperature falls outside any
+ * physically plausible tire range.  Pressures are in PSI*10, temps in C. */
+static bool tpms_values_plausible(int16_t psi_x10, int8_t temp_c)
+{
+    /* Pressure 10..80 PSI, temperature -40..+90 C. */
+    if (psi_x10 < 100 || psi_x10 > 800) return false;
+    if (temp_c  < -40 || temp_c  > 90)  return false;
+    return true;
+}
+
 /* Schrader (legacy US TPMS):
  *   preamble: 0xFF 0xFF
  *   sync    : 0x0F
@@ -412,8 +440,8 @@ static const uint8_t s_sync_schrader[] = { 0xFF, 0x0F };
 static bool tpms_decode_schrader(const uint8_t *bits, uint16_t nbits,
                                  int32_t sync_off, tpms_sensor_t *out)
 {
-    /* Need 4 payload bytes after the 2-byte sync. */
-    uint16_t want = (uint16_t)sync_off + 2U * 8U + 4U * 8U;
+    /* Need 4 payload bytes + 1 CRC byte after the 2-byte sync. */
+    uint16_t want = (uint16_t)sync_off + 2U * 8U + 5U * 8U;
     if (want > nbits) return false;
 
     uint8_t pl[4];
@@ -421,15 +449,23 @@ static bool tpms_decode_schrader(const uint8_t *bits, uint16_t nbits,
     {
         pl[i] = tpms_pack_byte(bits, (uint16_t)(sync_off + 16 + i * 8));
     }
+    uint8_t crc_rx = tpms_pack_byte(bits, (uint16_t)(sync_off + 16 + 4 * 8));
+
+    /* Schrader / generic CRC8 polynomial 0x07, init 0x00, over the 4
+     * payload bytes.  Reject if the trailing byte doesn't match. */
+    if (tpms_crc8(pl, 4U, 0x07U, 0x00U) != crc_rx) return false;
+
+    int16_t psi_x10 = (int16_t)((uint16_t)pl[1] * 25U / 10U);
+    int8_t  temp_c  = (int8_t)((int16_t)pl[2] - 40);
+    if (!tpms_values_plausible(psi_x10, temp_c)) return false;
 
     /* byte[0] is also part of the ID in some real Schrader frames; the
      * spec told us to use byte[1] for pressure / byte[2] for temperature
      * / byte[3] for status. */
     out->proto = TPMS_PROTO_SCHRADER;
     out->sensor_id = (uint32_t)pl[0] << 24;   /* 8-bit shown left-padded */
-    out->pressure_x10_psi = (int16_t)((uint16_t)pl[1] * 25U / 10U);
-    /* Above gives byte * 0.25 PSI in PSI*10 units (0.25 PSI = 2.5 in *10). */
-    out->temp_c = (int8_t)((int16_t)pl[2] - 40);
+    out->pressure_x10_psi = psi_x10;
+    out->temp_c = temp_c;
     out->flags = pl[3];
     out->raw_len = 4;
     memcpy(out->raw, pl, 4);
@@ -454,16 +490,23 @@ static bool tpms_decode_citroen(const uint8_t *bits, uint16_t nbits,
         pl[i] = tpms_pack_byte(bits, (uint16_t)(sync_off + 16 + i * 8));
     }
 
+    /* Citroen frame: pl[7] is the trailing CRC over pl[0..6] using
+     * polynomial 0x07, init 0x00 (same family as Schrader / SAE J2602). */
+    if (tpms_crc8(pl, 7U, 0x07U, 0x00U) != pl[7]) return false;
+
+    /* pressure in kPa * 0.75, convert to PSI*10 (1 kPa ~= 0.145 PSI). */
+    uint16_t kpa_x4 = (uint16_t)pl[4] * 3U;     /* kPa = pl[4]*0.75 -> *4 = pl[4]*3 */
+    int32_t  psi_x10 = (int32_t)kpa_x4 * 145 / 400;  /* (kPa*4)*0.145/4 = PSI */
+    int8_t   temp_c  = (int8_t)((int16_t)pl[5] - 40);
+    if (!tpms_values_plausible((int16_t)psi_x10, temp_c)) return false;
+
     out->proto = TPMS_PROTO_CITROEN;
     out->sensor_id = ((uint32_t)pl[0] << 24) |
                      ((uint32_t)pl[1] << 16) |
                      ((uint32_t)pl[2] << 8)  |
                       (uint32_t)pl[3];
-    /* pressure in kPa * 0.75, convert to PSI*10 (1 kPa ~= 0.145 PSI). */
-    uint16_t kpa_x4 = (uint16_t)pl[4] * 3U;     /* kPa = pl[4]*0.75 -> *4 = pl[4]*3 */
-    int32_t  psi_x10 = (int32_t)kpa_x4 * 145 / 400;  /* (kPa*4)*0.145/4 = PSI */
     out->pressure_x10_psi = (int16_t)psi_x10;
-    out->temp_c = (int8_t)((int16_t)pl[5] - 40);
+    out->temp_c = temp_c;
     out->flags = pl[6];
     out->raw_len = 8;
     memcpy(out->raw, pl, 8);
@@ -495,13 +538,22 @@ static bool tpms_decode_generic(const uint8_t *bits, uint16_t nbits,
     }
     if (all_zero || all_ff) return false;
 
+    int16_t psi_x10 = (int16_t)((uint16_t)pl[4] * 25U / 10U);
+    int8_t  temp_c  = (int8_t)((int16_t)pl[5] - 40);
+
+    /* Without a known CRC scheme for the generic decoder, fall back to a
+     * physical-plausibility check on the decoded values.  This still rejects
+     * the great majority of random 433 MHz noise that previously populated
+     * tpms_log.txt with hallucinated sensors. */
+    if (!tpms_values_plausible(psi_x10, temp_c)) return false;
+
     out->proto = TPMS_PROTO_GENERIC;
     out->sensor_id = ((uint32_t)pl[0] << 24) |
                      ((uint32_t)pl[1] << 16) |
                      ((uint32_t)pl[2] << 8)  |
                       (uint32_t)pl[3];
-    out->pressure_x10_psi = (int16_t)((uint16_t)pl[4] * 25U / 10U);
-    out->temp_c = (int8_t)((int16_t)pl[5] - 40);
+    out->pressure_x10_psi = psi_x10;
+    out->temp_c = temp_c;
     out->flags = pl[6];
     out->raw_len = 7;
     memcpy(out->raw, pl, 7);
@@ -634,7 +686,14 @@ static void tpms_radio_start(uint32_t freq_hz)
     SI446x_Set_Frequency(freq_hz);
     radio_set_antenna_mode(RADIO_ANTENNA_MODE_RX);
     SI446x_Start_Rx(0);
-    SI446x_Change_Modem_OOK_PDTC(0x6C);
+    /* TPMS bursts are short (~1 ms), 9.6-19.2 kbps, with sharp envelope
+     * edges from the FSK modulation that the SI4463 OOK peak detector still
+     * resolves at high enough SNR.  Use a faster PDTC and a tighter
+     * averaging window than the slow-baud POCSAG profile. */
+    SI446x_Apply_OOK_RX_Profile(/*pdtc*/    0x2A,
+                                /*cnt1*/    0x40,
+                                /*raw_ctrl*/0x82,
+                                /*raw_eye*/ 0x4F);
 
     m1_ringbuffer_init(&subghz_rx_rawdata_rb,
                        (uint8_t *)s_ring_storage,
@@ -911,8 +970,15 @@ static void tpms_assign_dialog(void)
         {
             if (sel < 4U)
             {
-                /* Clear any other sensor previously assigned to this wheel. */
-                for (uint8_t i = 0; i < s_ctx.sensor_count; i++)
+                /* Clear any other sensor previously assigned to this wheel.
+                 * Use the static cap (TPMS_MAX_SENSORS) as the loop bound so
+                 * the compiler can prove the array access stays in-bounds;
+                 * relying solely on s_ctx.sensor_count (uint8_t with no
+                 * static upper bound visible to GCC) trips
+                 * -Wstringop-overflow on -O2. */
+                uint8_t cap = s_ctx.sensor_count;
+                if (cap > TPMS_MAX_SENSORS) cap = TPMS_MAX_SENSORS;
+                for (uint8_t i = 0; i < cap; i++)
                 {
                     if (i != (uint8_t)s_ctx.last_decoded_idx &&
                         s_ctx.sensors[i].wheel == (uint8_t)(sel + 1U))

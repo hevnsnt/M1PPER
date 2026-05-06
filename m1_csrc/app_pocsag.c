@@ -803,8 +803,14 @@ void sub_ghz_pocsag(void)
     SI446x_Set_Frequency(freq_hz);
     radio_set_antenna_mode(RADIO_ANTENNA_MODE_RX);
     SI446x_Start_Rx(0);
-    /* Tighten OOK peak-detect for low data-rate POCSAG. */
-    SI446x_Change_Modem_OOK_PDTC(0x6C);
+    /* Per-app OOK RX profile.  POCSAG runs at 512/1200/2400 baud — much
+     * slower than 433 MHz remotes — so we want a longer peak-detector
+     * hold time and a wider averaging window to keep the carrier-on level
+     * stable across each Manchester-encoded bit. */
+    SI446x_Apply_OOK_RX_Profile(/*pdtc*/   0x6C,
+                                /*cnt1*/   0x42,
+                                /*raw_ctrl*/0x83,
+                                /*raw_eye*/ 0x6F);
 
     /* 4) Drive the existing TIM1 capture path so subghz_rx_rawdata_rb
      * fills automatically. We allocate the ring buffer directly here. */

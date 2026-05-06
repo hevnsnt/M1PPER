@@ -158,6 +158,8 @@ void SI446x_FiFoInfo(uint8_t FIFO);
 void SI446x_Write_TxFiFo(uint8_t numBytes, uint8_t *pTxData);
 void SI446x_Change_ModType(uint8_t NEW_MOD_TYPE);
 void SI446x_Change_Modem_OOK_PDTC(uint8_t NEW_PDTC);
+void SI446x_Apply_OOK_RX_Profile(uint8_t pdtc, uint8_t cnt1,
+                                 uint8_t raw_ctrl, uint8_t raw_eye);
 void SI446x_Change_Radio_Setting(uint8_t mode, uint8_t pa_power);
 void SI446x_Set_Tx_Power(uint8_t power);
 void SI446x_Select_Frontend(S_M1_SubGHz_Band network);
@@ -840,6 +842,58 @@ void SI446x_Change_Modem_OOK_PDTC(uint8_t NEW_PDTC)
     si446x_cmd_buffer[4] = NEW_PDTC; // Values
     SI446x_Send_Cmd(5, si446x_cmd_buffer);
 } // void SI446x_Change_Modem_OOK_PDTC(uint8_t NEW_PDTC)
+
+
+/******************************************************************************/
+/*
+ * Apply a per-app OOK direct-mode tuning struct.  Each field corresponds to
+ * one MODEM property; value 0xFF for any field means "leave the WDS default
+ * config alone".  This lets POCSAG (slow 512 baud), TPMS (~10 kbps short
+ * bursts), 433 MHz remotes, and the RF visualizer pick AGC / peak-detector
+ * settings independently rather than all sharing the same PDTC=0x6C.
+ *
+ * Property IDs:
+ *   0x40  MODEM_OOK_PDTC      attack + decay time of OOK peak detector
+ *   0x42  MODEM_OOK_CNT1      OOK averaging length / squelch count
+ *   0x45  MODEM_RAW_CONTROL   raw symbol clock and gain alignment
+ *   0x46  MODEM_RAW_EYE_2_1   raw eye target (2 bytes, here only [0])
+ */
+/******************************************************************************/
+void SI446x_Apply_OOK_RX_Profile(uint8_t pdtc, uint8_t cnt1,
+                                 uint8_t raw_ctrl, uint8_t raw_eye)
+{
+    if (pdtc != 0xFFU)
+    {
+        SI446x_Change_Modem_OOK_PDTC(pdtc);
+    }
+    if (cnt1 != 0xFFU)
+    {
+        si446x_cmd_buffer[0] = SI446X_CMD_ID_SET_PROPERTY;
+        si446x_cmd_buffer[1] = SI446X_GROUP_MODEM;
+        si446x_cmd_buffer[2] = 0x01;
+        si446x_cmd_buffer[3] = 0x42; /* MODEM_OOK_CNT1 */
+        si446x_cmd_buffer[4] = cnt1;
+        SI446x_Send_Cmd(5, si446x_cmd_buffer);
+    }
+    if (raw_ctrl != 0xFFU)
+    {
+        si446x_cmd_buffer[0] = SI446X_CMD_ID_SET_PROPERTY;
+        si446x_cmd_buffer[1] = SI446X_GROUP_MODEM;
+        si446x_cmd_buffer[2] = 0x01;
+        si446x_cmd_buffer[3] = 0x45; /* MODEM_RAW_CONTROL */
+        si446x_cmd_buffer[4] = raw_ctrl;
+        SI446x_Send_Cmd(5, si446x_cmd_buffer);
+    }
+    if (raw_eye != 0xFFU)
+    {
+        si446x_cmd_buffer[0] = SI446X_CMD_ID_SET_PROPERTY;
+        si446x_cmd_buffer[1] = SI446X_GROUP_MODEM;
+        si446x_cmd_buffer[2] = 0x01;
+        si446x_cmd_buffer[3] = 0x46; /* MODEM_RAW_EYE_2_1 */
+        si446x_cmd_buffer[4] = raw_eye;
+        SI446x_Send_Cmd(5, si446x_cmd_buffer);
+    }
+} // void SI446x_Apply_OOK_RX_Profile(...)
 
 
 
