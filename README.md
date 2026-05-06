@@ -139,12 +139,6 @@ No Flipper variant — stock or modified — can sniff Zigbee or Thread without 
 
 ---
 
-## No Stubs. No Coming Soon.
-
-If a feature is in the menu, it runs. Every entry in the table above uses real hardware on the M1. Nothing is stubbed. Nothing is placeholder. If it does not work yet, it is not in the menu.
-
----
-
 ## Flipper File Compatibility
 
 `.sub`, `.nfc`, `.rfid`, and `.ir` files from Flipper Zero drop directly onto the SD card and appear in the saved signal library. No conversion needed.
