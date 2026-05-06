@@ -57,6 +57,9 @@ build_lfrfid.txt
 build_lfrfid2.txt
 appsplan.md
 
+# IRMP upstream test corpus (not needed for building)
+Infrared/IR-Data/
+
 # AI assistant config (private, machine-specific)
 .claude/
 CLAUDE.md

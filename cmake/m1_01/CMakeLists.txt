@@ -31,20 +31,20 @@ target_include_directories(m1_01 INTERFACE
     ../../m1_csrc
     ../../Infrared
     ../../FatFs
-    ../../Sub_Ghz
-    ../../Sub_Ghz/protocols
-    ../../Esp32_serial_flasher/include
-    ../../Esp32_serial_flasher/port
-    ../../Esp32_serial_flasher/app/common
-    ../../Esp32_serial_flasher/private_include
-    ../../Esp_spi_at/build/include/
-    ../../Esp_spi_at/esp-idf/components/esp_common/include
-    ../../Esp_spi_at/esp-idf/components/esp_driver_spi/include/driver
-    ../../Esp_spi_at/esp-idf/components/hal/include/hal
-    ../../Esp_spi_at/esp-idf/components/log/include/hal
-    ../../Esp_spi_at/esp-idf/components/soc/esp32c6/include/soc
-    ../../Esp_spi_at/esp-idf/components/soc/esp32c6/register/soc
-    ../../Esp_spi_at/examples/at_spi_master/spi/stm32/main
+    ../../sub_ghz
+    ../../sub_ghz/protocols
+    ../../esp32_serial_flasher/include
+    ../../esp32_serial_flasher/port
+    ../../esp32_serial_flasher/app/common
+    ../../esp32_serial_flasher/private_include
+    ../../esp_spi_at/build/include/
+    ../../esp_spi_at/esp-idf/components/esp_common/include
+    ../../esp_spi_at/esp-idf/components/esp_driver_spi/include/driver
+    ../../esp_spi_at/esp-idf/components/hal/include/hal
+    ../../esp_spi_at/esp-idf/components/log/include/hal
+    ../../esp_spi_at/esp-idf/components/soc/esp32c6/include/soc
+    ../../esp_spi_at/esp-idf/components/soc/esp32c6/register/soc
+    ../../esp_spi_at/examples/at_spi_master/spi/stm32/main
     ../../Drivers/BSP/Components/ST25R3916/
     ../../NFC
     ../../NFC/Middlewares/ST/rfal/Inc
@@ -53,7 +53,7 @@ target_include_directories(m1_01 INTERFACE
     ../../NFC/NFC_drv/common
     ../../NFC/NFC_drv/legacy
     ../../NFC/NFC_drv/legacy/picopass
-    ../../Battery
+    ../../battery
     ../../lfrfid
     ../../USB
     ../../USB/Class/CDC/Inc
@@ -68,7 +68,7 @@ target_include_directories(m1_01 INTERFACE
 )
 
 target_sources(m1_01 INTERFACE
-    ../../Battery/battery.c
+    ../../battery/battery.c
     ../../Core/Src/FreeRTOS_CLI.c
     ../../Core/Src/app_freertos.c
     ../../Core/Src/cli_app.c
@@ -249,19 +249,19 @@ target_sources(m1_01 INTERFACE
     ../../Drivers/u8g2_csrc/u8x8_string.c
     ../../Drivers/u8g2_csrc/u8x8_u16toa.c
     ../../Drivers/u8g2_csrc/u8x8_u8toa.c
-    ../../Esp32_serial_flasher/app/common/app_common.c
-    ../../Esp32_serial_flasher/port/stm32_port.c
-    ../../Esp32_serial_flasher/src/esp_loader.c
-    ../../Esp32_serial_flasher/src/esp_stubs.c
-    ../../Esp32_serial_flasher/src/esp_targets.c
-    ../../Esp32_serial_flasher/src/md5_hash.c
-    ../../Esp32_serial_flasher/src/protocol_serial.c
-    ../../Esp32_serial_flasher/src/protocol_uart.c
-    ../../Esp32_serial_flasher/src/slip.c
-    ../../Esp_spi_at/esp-idf/components/esp_driver_spi/src/gpspi/spi_master.c
-    ../../Esp_spi_at/examples/at_spi_master/spi/stm32/main/esp_app_main.c
-    ../../Esp_spi_at/examples/at_spi_master/spi/stm32/main/esp_queue.c
-    ../../Esp_spi_at/examples/at_spi_master/spi/stm32/main/m1_at_response_parser.c
+    ../../esp32_serial_flasher/app/common/app_common.c
+    ../../esp32_serial_flasher/port/stm32_port.c
+    ../../esp32_serial_flasher/src/esp_loader.c
+    ../../esp32_serial_flasher/src/esp_stubs.c
+    ../../esp32_serial_flasher/src/esp_targets.c
+    ../../esp32_serial_flasher/src/md5_hash.c
+    ../../esp32_serial_flasher/src/protocol_serial.c
+    ../../esp32_serial_flasher/src/protocol_uart.c
+    ../../esp32_serial_flasher/src/slip.c
+    ../../esp_spi_at/esp-idf/components/esp_driver_spi/src/gpspi/spi_master.c
+    ../../esp_spi_at/examples/at_spi_master/spi/stm32/main/esp_app_main.c
+    ../../esp_spi_at/examples/at_spi_master/spi/stm32/main/esp_queue.c
+    ../../esp_spi_at/examples/at_spi_master/spi/stm32/main/m1_at_response_parser.c
     ../../FatFs/diskio.c
     ../../FatFs/ff.c
     ../../FatFs/ff_gen_drv.c
@@ -313,66 +313,66 @@ target_sources(m1_01 INTERFACE
     ../../NFC/NFC_drv/legacy/picopass/picopass_poller.c
     ../../NFC/NFC_drv/legacy/picopass/picopass_listener.c
     ../../NFC/app_x-cube-nfcx.c
-    ../../Sub_Ghz/datatypes_utils.c
-    ../../Sub_Ghz/m1_sub_ghz_api.c
-    ../../Sub_Ghz/m1_sub_ghz_decenc.c
-    ../../Sub_Ghz/protocols/m1_princeton_decode.c
-    ../../Sub_Ghz/protocols/m1_secplus_v2_decode.c
-    ../../Sub_Ghz/protocols/m1_came_decode.c
-    ../../Sub_Ghz/protocols/m1_nice_flo_decode.c
-    ../../Sub_Ghz/protocols/m1_linear_decode.c
-    ../../Sub_Ghz/protocols/m1_holtek_decode.c
-    ../../Sub_Ghz/protocols/m1_keeloq_decode.c
-    ../../Sub_Ghz/protocols/m1_oregon_v2_decode.c
-    ../../Sub_Ghz/protocols/m1_acurite_decode.c
-    ../../Sub_Ghz/protocols/m1_lacrosse_tx_decode.c
-    ../../Sub_Ghz/protocols/m1_faac_slh_decode.c
-    ../../Sub_Ghz/protocols/m1_hormann_decode.c
-    ../../Sub_Ghz/protocols/m1_marantec_decode.c
-    ../../Sub_Ghz/protocols/m1_somfy_telis_decode.c
-    ../../Sub_Ghz/protocols/m1_starline_decode.c
-    ../../Sub_Ghz/protocols/m1_gate_tx_decode.c
-    ../../Sub_Ghz/protocols/m1_smc5326_decode.c
-    ../../Sub_Ghz/protocols/m1_power_smart_decode.c
-    ../../Sub_Ghz/protocols/m1_ido_decode.c
-    ../../Sub_Ghz/protocols/m1_ansonic_decode.c
-    ../../Sub_Ghz/protocols/m1_infactory_decode.c
-    ../../Sub_Ghz/protocols/m1_schrader_decode.c
-    ../../Sub_Ghz/protocols/m1_generic_decode.c
-    ../../Sub_Ghz/protocols/m1_chamberlain_decode.c
-    ../../Sub_Ghz/protocols/m1_clemsa_decode.c
-    ../../Sub_Ghz/protocols/m1_doitrand_decode.c
-    ../../Sub_Ghz/protocols/m1_bett_decode.c
-    ../../Sub_Ghz/protocols/m1_nero_decode.c
-    ../../Sub_Ghz/protocols/m1_firefly_decode.c
-    ../../Sub_Ghz/protocols/m1_came_twee_decode.c
-    ../../Sub_Ghz/protocols/m1_came_atomo_decode.c
-    ../../Sub_Ghz/protocols/m1_nice_flor_s_decode.c
-    ../../Sub_Ghz/protocols/m1_alutech_decode.c
-    ../../Sub_Ghz/protocols/m1_centurion_decode.c
-    ../../Sub_Ghz/protocols/m1_kinggates_decode.c
-    ../../Sub_Ghz/protocols/m1_megacode_decode.c
-    ../../Sub_Ghz/protocols/m1_mastercode_decode.c
-    ../../Sub_Ghz/protocols/m1_chamberlain_7bit_decode.c
-    ../../Sub_Ghz/protocols/m1_chamberlain_8bit_decode.c
-    ../../Sub_Ghz/protocols/m1_chamberlain_9bit_decode.c
-    ../../Sub_Ghz/protocols/m1_liftmaster_decode.c
-    ../../Sub_Ghz/protocols/m1_dooya_decode.c
-    ../../Sub_Ghz/protocols/m1_honeywell_decode.c
-    ../../Sub_Ghz/protocols/m1_intertechno_decode.c
-    ../../Sub_Ghz/protocols/m1_elro_decode.c
-    ../../Sub_Ghz/protocols/m1_ambient_weather_decode.c
-    ../../Sub_Ghz/protocols/m1_bresser_3ch_decode.c
-    ../../Sub_Ghz/protocols/m1_bresser_5in1_decode.c
-    ../../Sub_Ghz/protocols/m1_bresser_6in1_decode.c
-    ../../Sub_Ghz/protocols/m1_tfa_dostmann_decode.c
-    ../../Sub_Ghz/protocols/m1_nexus_th_decode.c
-    ../../Sub_Ghz/protocols/m1_thermopro_tx2_decode.c
-    ../../Sub_Ghz/protocols/m1_gt_wt03_decode.c
-    ../../Sub_Ghz/protocols/m1_scher_khan_magicar_decode.c
-    ../../Sub_Ghz/protocols/m1_scher_khan_logicar_decode.c
-    ../../Sub_Ghz/protocols/m1_toyota_decode.c
-    ../../Sub_Ghz/protocols/m1_bin_raw_decode.c
+    ../../sub_ghz/datatypes_utils.c
+    ../../sub_ghz/m1_sub_ghz_api.c
+    ../../sub_ghz/m1_sub_ghz_decenc.c
+    ../../sub_ghz/protocols/m1_princeton_decode.c
+    ../../sub_ghz/protocols/m1_secplus_v2_decode.c
+    ../../sub_ghz/protocols/m1_came_decode.c
+    ../../sub_ghz/protocols/m1_nice_flo_decode.c
+    ../../sub_ghz/protocols/m1_linear_decode.c
+    ../../sub_ghz/protocols/m1_holtek_decode.c
+    ../../sub_ghz/protocols/m1_keeloq_decode.c
+    ../../sub_ghz/protocols/m1_oregon_v2_decode.c
+    ../../sub_ghz/protocols/m1_acurite_decode.c
+    ../../sub_ghz/protocols/m1_lacrosse_tx_decode.c
+    ../../sub_ghz/protocols/m1_faac_slh_decode.c
+    ../../sub_ghz/protocols/m1_hormann_decode.c
+    ../../sub_ghz/protocols/m1_marantec_decode.c
+    ../../sub_ghz/protocols/m1_somfy_telis_decode.c
+    ../../sub_ghz/protocols/m1_starline_decode.c
+    ../../sub_ghz/protocols/m1_gate_tx_decode.c
+    ../../sub_ghz/protocols/m1_smc5326_decode.c
+    ../../sub_ghz/protocols/m1_power_smart_decode.c
+    ../../sub_ghz/protocols/m1_ido_decode.c
+    ../../sub_ghz/protocols/m1_ansonic_decode.c
+    ../../sub_ghz/protocols/m1_infactory_decode.c
+    ../../sub_ghz/protocols/m1_schrader_decode.c
+    ../../sub_ghz/protocols/m1_generic_decode.c
+    ../../sub_ghz/protocols/m1_chamberlain_decode.c
+    ../../sub_ghz/protocols/m1_clemsa_decode.c
+    ../../sub_ghz/protocols/m1_doitrand_decode.c
+    ../../sub_ghz/protocols/m1_bett_decode.c
+    ../../sub_ghz/protocols/m1_nero_decode.c
+    ../../sub_ghz/protocols/m1_firefly_decode.c
+    ../../sub_ghz/protocols/m1_came_twee_decode.c
+    ../../sub_ghz/protocols/m1_came_atomo_decode.c
+    ../../sub_ghz/protocols/m1_nice_flor_s_decode.c
+    ../../sub_ghz/protocols/m1_alutech_decode.c
+    ../../sub_ghz/protocols/m1_centurion_decode.c
+    ../../sub_ghz/protocols/m1_kinggates_decode.c
+    ../../sub_ghz/protocols/m1_megacode_decode.c
+    ../../sub_ghz/protocols/m1_mastercode_decode.c
+    ../../sub_ghz/protocols/m1_chamberlain_7bit_decode.c
+    ../../sub_ghz/protocols/m1_chamberlain_8bit_decode.c
+    ../../sub_ghz/protocols/m1_chamberlain_9bit_decode.c
+    ../../sub_ghz/protocols/m1_liftmaster_decode.c
+    ../../sub_ghz/protocols/m1_dooya_decode.c
+    ../../sub_ghz/protocols/m1_honeywell_decode.c
+    ../../sub_ghz/protocols/m1_intertechno_decode.c
+    ../../sub_ghz/protocols/m1_elro_decode.c
+    ../../sub_ghz/protocols/m1_ambient_weather_decode.c
+    ../../sub_ghz/protocols/m1_bresser_3ch_decode.c
+    ../../sub_ghz/protocols/m1_bresser_5in1_decode.c
+    ../../sub_ghz/protocols/m1_bresser_6in1_decode.c
+    ../../sub_ghz/protocols/m1_tfa_dostmann_decode.c
+    ../../sub_ghz/protocols/m1_nexus_th_decode.c
+    ../../sub_ghz/protocols/m1_thermopro_tx2_decode.c
+    ../../sub_ghz/protocols/m1_gt_wt03_decode.c
+    ../../sub_ghz/protocols/m1_scher_khan_magicar_decode.c
+    ../../sub_ghz/protocols/m1_scher_khan_logicar_decode.c
+    ../../sub_ghz/protocols/m1_toyota_decode.c
+    ../../sub_ghz/protocols/m1_bin_raw_decode.c
     ../../USB/Class/CDC/Src/usbd_cdc.c
     ../../USB/Class/CDC/Src/usbd_cdc_if.c
     ../../USB/Class/CompositeBuilder/Src/usbd_composite_builder.c
@@ -468,25 +468,23 @@ target_sources(m1_01 INTERFACE
     ../../m1_csrc/m1_wifi.c
     ../../m1_csrc/privateprofilestring.c
     ../../m1_csrc/uiView.c
-    # === Enhanced firmware: Flipper file format parsers (Phase 2) ===
+    # Flipper file format parsers
     ../../m1_csrc/flipper_file.c
     ../../m1_csrc/flipper_ir.c
     ../../m1_csrc/flipper_subghz.c
     ../../m1_csrc/flipper_nfc.c
     ../../m1_csrc/flipper_rfid.c
-    # === Enhanced firmware: Universal Remote + Crypto (Phase 3+5) ===
+    # Crypto, WiFi credentials, IR universal remote
     ../../m1_csrc/m1_ir_universal.c
     ../../m1_csrc/m1_crypto.c
     ../../m1_csrc/m1_wifi_cred.c
-    # === Enhanced firmware: Flipper integration (Phase 6) ===
     ../../m1_csrc/m1_flipper_integration.c
-    # === Enhanced firmware: BadUSB (Phase 7) ===
+    # USB HID / BadUSB / Bad-BT
     ../../USB/Class/HID/Src/usbd_hid.c
     ../../m1_csrc/m1_badusb.c
     ../../m1_csrc/m1_badusb_fingerprint.c
-    # === Enhanced firmware: Bad-BT (Phase 8) ===
     ../../m1_csrc/m1_badbt.c
-    # === Enhanced firmware: Built-in Games (Phase 9) ===
+    # Games and built-in apps
     ../../m1_csrc/m1_games.c
     ../../m1_csrc/game_snake.c
     ../../m1_csrc/game_tetris.c
@@ -503,33 +501,29 @@ target_sources(m1_01 INTERFACE
     ../../m1_csrc/m1_rgb_backlight.c
     ../../m1_csrc/app_rgb_backlight.c
     ../../m1_csrc/app_stock_backlight.c
-    # === Enhanced firmware: ELF App Loader (Phase 10) ===
+    # ELF app loader and external app API
     ../../m1_csrc/m1_elf_loader.c
     ../../m1_csrc/m1_app_api.c
     ../../m1_csrc/m1_app_manager.c
     ../../m1_csrc/m1_field_detect.c
-    # === Omni-Sniffer: BLE tracker detection ===
+    # BLE: Omni-Sniffer, BLE Spam, BLEPTD, GATT browser
     ../../m1_csrc/app_omni_sniffer.c
-    # === BLE Spam: Apple/Google/Samsung/Windows proximity popups ===
     ../../m1_csrc/app_ble_spam.c
-    # === SubGHz Playlist: sequential .sub/.sgh file playback ===
+    ../../m1_csrc/app_bleptd.c
+    ../../m1_csrc/app_ble_gatt.c
+    # Sub-GHz: Playlist, POCSAG, RF Visualizer, TPMS
     ../../m1_csrc/app_subghz_playlist.c
-    # === POCSAG pager decoder ===
     ../../m1_csrc/app_pocsag.c
-    # === C3.6: NFC extended attacks ===
+    ../../m1_csrc/app_rf_visualizer.c
+    ../../m1_csrc/app_tpms.c
+    # NFC: Magic write, default key survey, EMV reader
     ../../m1_csrc/app_nfc_magic.c
     ../../m1_csrc/app_nfc_nested.c
     ../../m1_csrc/app_nfc_emv.c
-    # === C3.6: BLE BLEPTD + GATT ===
-    ../../m1_csrc/app_bleptd.c
-    ../../m1_csrc/app_ble_gatt.c
-    # === C3.6: WiFi Evil Portal + Net Recon ===
+    # WiFi: Evil Portal, Net Recon
     ../../m1_csrc/app_evil_portal.c
     ../../m1_csrc/app_net_recon.c
-    # === C3.6: Sub-GHz RF Visualizer + TPMS ===
-    ../../m1_csrc/app_rf_visualizer.c
-    ../../m1_csrc/app_tpms.c
-    # === C3.6: Tools TV-B-Gone + TOTP + iButton ===
+    # Tools: TV-B-Gone, TOTP/HOTP, iButton
     ../../m1_csrc/app_tvbgone.c
     ../../m1_csrc/app_totp.c
     ../../m1_csrc/app_ibutton.c
