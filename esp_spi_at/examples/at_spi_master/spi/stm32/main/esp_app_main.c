@@ -2060,6 +2060,45 @@ uint8_t wifi_esp_deauth_start(const char *bssid, uint8_t channel, const char *st
 		return ERROR;
 	}
 
+	/* PMF-required APs (802.11w/MFP=2) drop ff:ff broadcast deauth
+	 * frames. We can detect that by re-scanning the target via
+	 * AT+CWLAP=1,"<ssid>" and checking <pairwise_cipher> + <pmf>.
+	 * However, CWLAP cannot be filtered by BSSID directly and a
+	 * full CWLAP rescan adds 2-3s to every deauth attempt. As a
+	 * compromise: if station_mac is NULL (broadcast deauth), do a
+	 * targeted rescan; if a unicast station MAC is provided,
+	 * proceed directly because unicast deauth bypasses MFP scope.
+	 *
+	 * TODO (better fix in ESP-AT custom command): plumb the
+	 * encryption_mode capabilities byte from the cached scan list
+	 * back through CWLAP so the master can pre-grey the menu. */
+	if (station_mac == NULL || station_mac[0] == '\0') {
+		char qresp[512];
+		snprintf(cmd, sizeof(cmd), "AT+CWLAP\r\n");
+		if (spi_AT_send_recv(cmd, qresp, sizeof(qresp), 8) == SUCCESS) {
+			/* Look for the bssid line. CWLAP rows are:
+			 *   +CWLAP:(<ecn>,<ssid>,<rssi>,<bssid>,<ch>,...,<pmf>) */
+			const char *row = strstr(qresp, bssid);
+			if (row != NULL) {
+				/* Walk back to the row start, then forward to the
+				 * last field before ')'. */
+				const char *row_end = strchr(row, ')');
+				if (row_end != NULL) {
+					const char *last_comma = row_end;
+					while (last_comma > row && *last_comma != ',') last_comma--;
+					if (*last_comma == ',') {
+						int pmf = atoi(last_comma + 1);
+						/* bit1 = MFP-required */
+						if (pmf & 0x02) {
+							M1_LOG_E(TAG, "Deauth refused: AP requires PMF (pmf=%d)\r\n", pmf);
+							return ERROR;
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if (station_mac != NULL && station_mac[0] != '\0')
 	{
 		snprintf(cmd, sizeof(cmd), "%s\"%s\",%u,\"%s\",%u\r\n",
