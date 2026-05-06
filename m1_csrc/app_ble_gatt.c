@@ -34,13 +34,19 @@
 
 /* ---- tuning ---- */
 #define GATT_MAX_DEVICES        16
-#define GATT_MAX_SERVICES       16
-#define GATT_MAX_CHARS          48
-#define GATT_AT_BUF_SIZE       512
+#define GATT_MAX_SERVICES       32   /* Was 16; Apple Watch ~30 services. */
+#define GATT_MAX_CHARS         128   /* Was 48; Apple Watch >100 chars.   */
+#define GATT_AT_BUF_SIZE      1024   /* Larger to fit primsrv enumeration */
 #define GATT_SCAN_SECONDS        5
 #define GATT_AT_TIMEOUT_S        3
 #define GATT_CONN_TIMEOUT_S      8
 #define GATT_VAL_LEN            48
+
+/* When the on-device tables overflow, surface a "truncated" hint in
+ * the browse view so the user knows the device has more services
+ * or characteristics than we display. */
+static bool s_srvs_truncated;
+static bool s_chars_truncated;
 
 /* Display geometry */
 #define GATT_ROW_H              10
@@ -263,6 +269,11 @@ static void scan_devices(void)
     s_dev_sel = 0;
     s_dev_scroll = 0;
 
+    /* Tear down any previous BLE init before re-init. AT+BLEINIT=1
+     * issued while role is already 2 (server) or 1 (client) returns
+     * ERROR. Always go through 0 first. */
+    at_send("AT+BLEINIT=0\r\n", GATT_AT_TIMEOUT_S);
+    vTaskDelay(pdMS_TO_TICKS(80));
     at_send("AT+BLEINIT=1\r\n", GATT_AT_TIMEOUT_S);
     vTaskDelay(pdMS_TO_TICKS(50));
     at_send("AT+BLESCANPARAM=0,0,0,80,40\r\n", GATT_AT_TIMEOUT_S);
@@ -339,14 +350,48 @@ static bool gatt_connect(const gatt_dev_t *d)
         if (addr_lc[i] >= 'A' && addr_lc[i] <= 'F')
             addr_lc[i] = (char)(addr_lc[i] + 32);
 
+    /* Ensure clean BLE state before issuing the connect. AT+BLEINIT=1
+     * is needed in client role; if a prior session left it as 2
+     * (server) or 0, the connect would fail with ERROR. */
+    at_send("AT+BLEINIT=0\r\n", GATT_AT_TIMEOUT_S);
+    vTaskDelay(pdMS_TO_TICKS(80));
+    at_send("AT+BLEINIT=1\r\n", GATT_AT_TIMEOUT_S);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
     char cmd[64];
     snprintf(cmd, sizeof(cmd),
              "AT+BLECONN=0,\"%s\",%u,%u\r\n",
              addr_lc, (unsigned)d->addr_type, (unsigned)GATT_CONN_TIMEOUT_S);
-    spi_AT_send_recv(cmd, s_at_buf, sizeof(s_at_buf), GATT_CONN_TIMEOUT_S + 2);
+    /* AT+BLECONN returns "OK" synchronously the moment the
+     * connection request is *accepted* by the local controller;
+     * the actual GATT link is established later, signalled by the
+     * unsolicited "+BLECONN:0" event. Acting on synchronous "OK"
+     * causes AT+BLEGATTCPRIMSRV=0 to be issued before the link is
+     * up, returning ERROR -- the user sees "No services found"
+     * instead of "connect failed". Poll up to GATT_CONN_TIMEOUT_S
+     * seconds for the explicit event. */
+    if (spi_AT_send_recv(cmd, s_at_buf, sizeof(s_at_buf),
+                         GATT_CONN_TIMEOUT_S + 2) != SUCCESS) {
+        return false;
+    }
+    if (strstr(s_at_buf, "ERROR") != NULL && strstr(s_at_buf, "+BLECONN:0") == NULL)
+        return false;
+    if (strstr(s_at_buf, "+BLECONN:0") != NULL)
+        return true;
 
-    if (strstr(s_at_buf, "+BLECONN:0")) return true;
-    if (strstr(s_at_buf, "OK"))         return true;
+    /* Poll for the unsolicited +BLECONN:0 event. */
+    TickType_t deadline = xTaskGetTickCount() +
+                          pdMS_TO_TICKS(GATT_CONN_TIMEOUT_S * 1000U);
+    while (xTaskGetTickCount() < deadline) {
+        vTaskDelay(pdMS_TO_TICKS(150));
+        /* Bare AT poll surfaces queued unsolicited events. */
+        if (spi_AT_send_recv("AT\r\n", s_at_buf, sizeof(s_at_buf), 1) != SUCCESS)
+            continue;
+        if (strstr(s_at_buf, "+BLECONN:0") != NULL)
+            return true;
+        if (strstr(s_at_buf, "+BLEDISCONN:0") != NULL)
+            return false;
+    }
     return false;
 }
 
@@ -403,6 +448,11 @@ static void parse_primsrv_lines(void)
                     s->uuid_is_16 = false;
                 }
                 s_srv_n++;
+            } else {
+                /* Device exposes more services than our static
+                 * table can hold. Surface to the user instead of
+                 * silently dropping. */
+                s_srvs_truncated = true;
             }
         }
 
@@ -461,6 +511,10 @@ static void parse_char_lines(uint8_t srv_idx)
                     }
                     c->prop = (uint8_t)prop;
                     s_char_n++;
+                } else if ((uint8_t)srv == srv_idx) {
+                    /* More chars than our static table holds.
+                     * Surface as truncation. */
+                    s_chars_truncated = true;
                 }
             }
         }
@@ -474,6 +528,8 @@ static void enumerate_services(void)
 {
     s_srv_n  = 0;
     s_char_n = 0;
+    s_srvs_truncated  = false;
+    s_chars_truncated = false;
 
     /* Discover primary services */
     at_send("AT+BLEGATTCPRIMSRV=0\r\n", GATT_CONN_TIMEOUT_S);
@@ -533,7 +589,12 @@ static bool read_char_value(uint8_t srv_idx, uint8_t char_idx,
                  uuid_str ? uuid_str : "?");
     }
 
-    /* Look for "+BLEGATTCRD:0,<len>,<hex>" */
+    /* ESP-AT response is "+BLEGATTCRD:<conn>,<srv>,<char>,<value>"
+     * (4 comma-separated fields). The previous parser expected
+     * 3 fields (<conn>,<len>,<hex>) and read the value from a
+     * field that actually held the characteristic index, returning
+     * misaligned data. Walk all 4 fields and pick the last one as
+     * the hex value. */
     char *line = s_at_buf;
     while (line && *line) {
         char *nl = strchr(line, '\n');
@@ -546,17 +607,29 @@ static bool read_char_value(uint8_t srv_idx, uint8_t char_idx,
             (void)conn;
             while (*p && *p != ',') p++;
             if (*p == ',') p++;
-            int len = atoi(p);
-            (void)len;
+            int srv = atoi(p);
+            (void)srv;
             while (*p && *p != ',') p++;
             if (*p == ',') p++;
-            /* The remainder is hex */
+            int chx = atoi(p);
+            (void)chx;
+            while (*p && *p != ',') p++;
+            if (*p == ',') p++;
+            /* The remaining field is the value. May be quoted hex
+             * or naked hex (firmware-version dependent). */
             char *hex = p;
-            /* Trim quotes if any */
             if (*hex == '"') {
                 hex++;
                 char *q = strchr(hex, '"');
                 if (q) *q = '\0';
+            } else {
+                /* Strip trailing whitespace / CR if present. */
+                size_t hlen = strlen(hex);
+                while (hlen > 0 && (hex[hlen - 1] == '\r' ||
+                                    hex[hlen - 1] == ' '  ||
+                                    hex[hlen - 1] == '\t')) {
+                    hex[--hlen] = '\0';
+                }
             }
             s_read_value_len = (uint8_t)hex_decode(hex, s_read_value, GATT_VAL_LEN);
             return true;
@@ -676,8 +749,13 @@ static void draw_browse(void)
     u8g2_SetFont(&m1_u8g2, M1_DISP_MAIN_MENU_FONT_N);
     u8g2_SetDrawColor(&m1_u8g2, M1_DISP_DRAW_COLOR_TXT);
     {
-        char r[10];
-        snprintf(r, sizeof(r), "%us %uc", (unsigned)s_srv_n, (unsigned)s_char_n);
+        char r[14];
+        /* Append a "+" suffix to the count when the on-device tables
+         * truncated the result, so the user knows the device has
+         * more services or characteristics than we display. */
+        snprintf(r, sizeof(r), "%u%ss %u%sc",
+                 (unsigned)s_srv_n,  s_srvs_truncated  ? "+" : "",
+                 (unsigned)s_char_n, s_chars_truncated ? "+" : "");
         draw_header(r);
     }
 
