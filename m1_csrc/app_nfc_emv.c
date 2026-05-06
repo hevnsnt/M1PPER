@@ -123,12 +123,35 @@ static bool send_apdu(const rfalIsoDepDevice *isoDep,
     err = rfalIsoDepStartApduTransceive(param);
     if (err != RFAL_ERR_NONE) return false;
 
-    /* Poll until the transceive is finished (~3 seconds budget). */
-    for (int i = 0; i < 1500; i++) {
+    /*
+     * Audit Item 12: deadline-based wait off the card's reported FWT.
+     *
+     * The previous fixed 1500*2ms = ~3s budget caused premature timeouts on
+     * EMV chips that legitimately need 5-10s for cryptographic operations
+     * (PDOL evaluation, GENERATE AC offline data authentication, etc.).
+     *
+     * RFAL reports per-card timing via info->FWT (Frame Waiting Time, in
+     * 1/fc units) and info->dFWT (max additional accumulated wait).  We
+     * convert that to milliseconds and add a generous safety margin
+     * (3x dFWT + 100ms slack) so cards near the upper FWT bound still
+     * complete.  Cap at 10s to avoid wedging the UI on a stuck card.
+     */
+    uint32_t fwt_ms      = rfalConv1fcToMs(info->FWT);
+    uint32_t dfwt_ms     = rfalConv1fcToMs(info->dFWT);
+    uint32_t deadline_ms = fwt_ms + 3U * dfwt_ms + 100U;
+    if (deadline_ms > 10000U) deadline_ms = 10000U;
+    if (deadline_ms <   500U) deadline_ms =   500U;
+
+    TickType_t start = xTaskGetTickCount();
+    for (;;) {
         rfalNfcWorker();
         err = rfalIsoDepGetApduTransceiveStatus();
         if (err != RFAL_ERR_BUSY) break;
-        vTaskDelay(2);
+        if ((uint32_t)(xTaskGetTickCount() - start) >= pdMS_TO_TICKS(deadline_ms)) {
+            err = RFAL_ERR_TIMEOUT;
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
     if (err != RFAL_ERR_NONE) return false;
 
@@ -166,18 +189,28 @@ static bool tlv_parse_one(const uint8_t **pp, const uint8_t *end,
         tag = (uint16_t)((tag << 8) | *p++);
     }
 
-    /* length */
+    /* length.
+     *
+     * Audit Item 20: previous code rejected lengths encoded with > 2
+     * length-of-length bytes.  EMV PSE FCI responses legitimately use
+     * 3-byte lengths for fielded transit/long records.  We now accept
+     * 1..4 length-of-length bytes (covering up to 4-byte payload length,
+     * far beyond any single TLV envelope an EMV card returns).  We track
+     * the length in 32-bit, then narrow to uint16_t after a sanity check
+     * because the rest of the parser uses uint16_t bounds. */
     if (p >= end) return false;
-    uint16_t len = *p++;
-    if (len & 0x80) {
-        uint8_t lol = (uint8_t)(len & 0x7F);
-        if (lol == 0 || lol > 2) return false;
-        len = 0;
+    uint32_t len32 = *p++;
+    if (len32 & 0x80) {
+        uint8_t lol = (uint8_t)(len32 & 0x7F);
+        if (lol == 0 || lol > 4) return false;
+        len32 = 0;
         while (lol--) {
             if (p >= end) return false;
-            len = (uint16_t)((len << 8) | *p++);
+            len32 = (len32 << 8) | (uint32_t)(*p++);
         }
     }
+    if (len32 > 0xFFFFU) return false;
+    uint16_t len = (uint16_t)len32;
 
     if ((p + len) > end) return false;
 
@@ -432,9 +465,93 @@ static uint8_t parse_ppse_aids(const uint8_t *resp, uint16_t resp_len,
 }
 
 /*
- * Read records by issuing READ RECORD across SFI 1..10, record 1..16.
- * Stops scanning a SFI on the first non-9000 status. Updates card from
- * the TLV data found in any successful record.
+ * Process one record body's TLV stream and merge fields into the card.
+ * Factor of the read_records walk so both the AFL-driven and fallback
+ * paths can call it.
+ */
+static void merge_record_tlv(const uint8_t *body, uint16_t body_len,
+                             emv_card_t *card)
+{
+    const uint8_t *inner     = body;
+    uint16_t       inner_len = body_len;
+    const uint8_t *t70_val;
+    uint16_t       t70_len;
+    if (tlv_find(body, body_len, 0x70, &t70_val, &t70_len)) {
+        inner     = t70_val;
+        inner_len = t70_len;
+    }
+
+    const uint8_t *v;
+    uint16_t       l;
+    if (tlv_find(inner, inner_len, 0x5A, &v, &l) && !card->have_pan) {
+        decode_pan(v, l, card->pan, sizeof(card->pan));
+        if (card->pan[0] != '\0') card->have_pan = true;
+    }
+    if (tlv_find(inner, inner_len, 0x57, &v, &l)) {
+        decode_track2(v, l, card);
+    }
+    if (tlv_find(inner, inner_len, 0x5F24, &v, &l)) {
+        decode_expiry(v, l, card);
+    }
+    if (tlv_find(inner, inner_len, 0x5F20, &v, &l)) {
+        decode_name(v, l, card);
+    }
+}
+
+/*
+ * Audit Item 19: AFL-driven READ RECORD.
+ *
+ * The AFL (Application File Locator, tag 94) is returned inside the GPO
+ * response and tells us EXACTLY which (SFI, first_rec, last_rec) ranges
+ * the issuer wants us to read.  Walking it instead of the fixed
+ * 1..10 x 1..16 = 160-APDU sweep:
+ *   - cuts ~1.5 s/card
+ *   - avoids consecutive 6A83 responses that some chips treat as a card
+ *     misuse heuristic and lock out
+ *
+ * AFL format: groups of 4 bytes
+ *   byte 0: SFI (high 5 bits) | 0x04
+ *   byte 1: first record
+ *   byte 2: last record
+ *   byte 3: number of records involved in offline data authentication
+ *           (we don't care for read purposes)
+ */
+static bool read_records_via_afl(const rfalIsoDepDevice *isoDep,
+                                 const uint8_t *afl, uint16_t afl_len,
+                                 emv_card_t *card)
+{
+    if ((afl_len % 4U) != 0U || afl_len == 0U) return false;
+
+    uint8_t  apdu[5];
+    uint8_t  resp[300];
+    uint16_t resp_len = 0;
+
+    for (uint16_t i = 0; i + 4U <= afl_len; i += 4U) {
+        uint8_t sfi_byte = afl[i];
+        uint8_t sfi      = (uint8_t)(sfi_byte >> 3);
+        uint8_t first    = afl[i + 1];
+        uint8_t last     = afl[i + 2];
+        if (sfi == 0 || sfi > 30 || first == 0 || last < first) continue;
+        if (last - first > 16) continue; /* guard against malformed AFL */
+
+        for (uint8_t rec = first; rec <= last; rec++) {
+            apdu[0] = 0x00;
+            apdu[1] = 0xB2;
+            apdu[2] = rec;
+            apdu[3] = (uint8_t)((sfi << 3) | 0x04);
+            apdu[4] = 0x00;
+            if (!send_apdu(isoDep, apdu, 5, resp, sizeof(resp), &resp_len)) break;
+            if (!sw_ok(resp, resp_len)) break;
+            merge_record_tlv(resp, (uint16_t)(resp_len - 2), card);
+            if (card->have_pan && card->have_exp && card->have_name) return true;
+        }
+    }
+    return card->have_pan;
+}
+
+/*
+ * Fallback fixed walk used when no AFL is present in the GPO response.
+ * Keep it conservative to bound APDU count.
  */
 static void read_records(const rfalIsoDepDevice *isoDep, emv_card_t *card)
 {
@@ -449,53 +566,11 @@ static void read_records(const rfalIsoDepDevice *isoDep, emv_card_t *card)
             apdu[2] = rec;
             apdu[3] = (uint8_t)((sfi << 3) | 0x04);
             apdu[4] = 0x00;
-            if (!send_apdu(isoDep, apdu, 5, resp, sizeof(resp), &resp_len)) {
-                /* Skip the rest of this SFI on transport error */
-                break;
-            }
-            if (!sw_ok(resp, resp_len)) {
-                /* If first record of this SFI fails, the SFI is empty */
-                if (rec == 1) break;
-                /* Otherwise the SFI just ended */
-                break;
-            }
+            if (!send_apdu(isoDep, apdu, 5, resp, sizeof(resp), &resp_len)) break;
+            if (!sw_ok(resp, resp_len)) break;
+            merge_record_tlv(resp, (uint16_t)(resp_len - 2), card);
 
-            uint16_t body_len = (uint16_t)(resp_len - 2);
-            const uint8_t *body = resp;
-
-            /* Records are usually wrapped in tag 70 */
-            const uint8_t *inner = body;
-            uint16_t       inner_len = body_len;
-            const uint8_t *t70_val;
-            uint16_t       t70_len;
-            if (tlv_find(body, body_len, 0x70, &t70_val, &t70_len)) {
-                inner     = t70_val;
-                inner_len = t70_len;
-            }
-
-            const uint8_t *v;
-            uint16_t       l;
-            if (tlv_find(inner, inner_len, 0x5A, &v, &l)) {
-                if (!card->have_pan) {
-                    decode_pan(v, l, card->pan, sizeof(card->pan));
-                    if (card->pan[0] != '\0') card->have_pan = true;
-                }
-            }
-            if (tlv_find(inner, inner_len, 0x57, &v, &l)) {
-                decode_track2(v, l, card);
-            }
-            if (tlv_find(inner, inner_len, 0x5F24, &v, &l)) {
-                decode_expiry(v, l, card);
-            }
-            if (tlv_find(inner, inner_len, 0x5F20, &v, &l)) {
-                decode_name(v, l, card);
-            }
-
-            /* If we already have everything, bail out early */
-            if (card->have_pan && card->have_exp) {
-                /* keep scanning a bit for name, but cap */
-                if (card->have_name) return;
-            }
+            if (card->have_pan && card->have_exp && card->have_name) return;
         }
     }
 }
@@ -544,14 +619,39 @@ static bool run_emv_flow(rfalNfcDevice *dev, emv_card_t *card)
                    resp, sizeof(resp), &resp_len)) return false;
     if (!sw_ok(resp, resp_len)) return false;
 
-    /* 4) GET PROCESSING OPTIONS with empty PDOL */
-    if (!send_apdu(isoDep, s_apdu_gpo_empty, sizeof(s_apdu_gpo_empty),
-                   resp, sizeof(resp), &resp_len)) {
-        /* Some cards reject empty PDOL; fall through to record reads */
+    /* 4) GET PROCESSING OPTIONS with empty PDOL.
+     *    On success, the response carries either:
+     *      - format 1: 80 <len> <AIP[2]> <AFL[...]>
+     *      - format 2: 77 ... 82(AIP) ... 94(AFL) ...
+     *    We parse out tag 94 (AFL) when present so the READ RECORD walk
+     *    visits ONLY the issuer-specified records (Item 19). */
+    bool used_afl = false;
+    if (send_apdu(isoDep, s_apdu_gpo_empty, sizeof(s_apdu_gpo_empty),
+                  resp, sizeof(resp), &resp_len) &&
+        sw_ok(resp, resp_len))
+    {
+        uint16_t body_len = (uint16_t)(resp_len - 2);
+        const uint8_t *afl_val = NULL;
+        uint16_t       afl_len = 0;
+
+        /* Format 2 — search for tag 94 anywhere */
+        if (tlv_find(resp, body_len, 0x94, &afl_val, &afl_len)) {
+            used_afl = read_records_via_afl(isoDep, afl_val, afl_len, card);
+        } else if (body_len >= 4 && resp[0] == 0x80) {
+            /* Format 1 — AIP[2] then AFL[len-2] */
+            uint16_t fmt1_len = resp[1];
+            if (fmt1_len >= 2 && (uint16_t)(2 + fmt1_len) <= body_len) {
+                afl_val = &resp[4];           /* skip AIP */
+                afl_len = (uint16_t)(fmt1_len - 2U);
+                used_afl = read_records_via_afl(isoDep, afl_val, afl_len, card);
+            }
+        }
     }
 
-    /* 5) READ RECORD walk */
-    read_records(isoDep, card);
+    /* 5) Fallback wide READ RECORD walk if no AFL or AFL gave nothing */
+    if (!used_afl) {
+        read_records(isoDep, card);
+    }
 
     return card->have_pan;
 }
@@ -567,7 +667,16 @@ static bool discover_iso_dep(rfalNfcDevice **dev_out)
     rfalNfcDefaultDiscParams(&dp);
     dp.devLimit      = 1;
     dp.totalDuration = 500;
-    dp.techs2Find    = RFAL_NFC_POLL_TECH_A | RFAL_NFC_POLL_TECH_B;
+    /* Audit Item 18: extend discovery to NFC-F so JCB QUICPay (FeliCa-based)
+     * and Suica-linked credit instruments enumerate.  POLL_TECH_F is
+     * essentially free here — RFAL polls it after A/B and only adds a few
+     * ms when no NFC-F card is present.  NFC-F devices that respond to the
+     * SystemCode 0xFE00 (EMV) will activate ISO-DEP-equivalent transport
+     * via the FeliCa Read Without Encryption command set; cards that do
+     * not are filtered out by the "rfInterface == ISODEP" check below. */
+    dp.techs2Find    = RFAL_NFC_POLL_TECH_A
+                     | RFAL_NFC_POLL_TECH_B
+                     | RFAL_NFC_POLL_TECH_F;
     dp.compMode      = RFAL_COMPLIANCE_MODE_NFC;
 
     if (rfalNfcDiscover(&dp) != RFAL_ERR_NONE) return false;
