@@ -219,7 +219,10 @@ void m1_lcd_init(SPI_HandleTypeDef *phspi)
 	m1_lcd_dma_init(phspi);
 
     HAL_Delay(2); // Wait for stable power after power on, > 1ms
-    u8g2_Setup_st7567_enh_dg128064i_f(&m1_u8g2, U8G2_R2, u8x8_byte_stm32_4wire_hw_spi, u8x8_stm32_gpio_and_delay);
+    /* Use u8g2's R0 (no software rotation) and rely on the panel's native
+     * flip cmds via u8g2_SetFlipMode below.  Saves the per-pixel coord
+     * transform that R2 would impose on every draw call. */
+    u8g2_Setup_st7567_enh_dg128064i_f(&m1_u8g2, U8G2_R0, u8x8_byte_stm32_4wire_hw_spi, u8x8_stm32_gpio_and_delay);
 	u8g2_InitDisplay(&m1_u8g2);
 
 	// Custom init for the LCD
@@ -235,6 +238,12 @@ void m1_lcd_init(SPI_HandleTypeDef *phspi)
 
 	//Set power save mode ON to clear any unwanted objects displayed on the LCD unexpectedly after POR
 	u8g2_SetPowerSave(&m1_u8g2, true);
+
+	/* Default to "normal" (right-handed) orientation — matches the visual
+	 * layout that the legacy U8G2_R2 setup produced.  m1_lcd_set_southpaw()
+	 * called from settings_load_from_sd will flip this if the user has the
+	 * left-handed preference saved. */
+	u8g2_SetFlipMode(&m1_u8g2, 1U);
 
 	/* First post-boot frame must always push — the panel may have any prior
 	 * state and our local CRC cache is uninitialized before the first call.
@@ -267,13 +276,33 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 /*============================================================================*/
 /**
   * @brief  Set southpaw (left-handed) display rotation
-  * @param  enable: 1=southpaw (R0), 0=normal (R2)
+  *
+  *         audit 07 m1_lcd.c:182 — the prior implementation used
+  *         u8g2_SetDisplayRotation(U8G2_R0/R2) which incurs a software
+  *         coordinate transform on every u8g2_DrawPixel/Box/Frame call
+  *         (a couple of multiplies per primitive on a 1024-byte buffer
+  *         — not free at 75 MHz).
+  *
+  *         u8g2_SetFlipMode emits ST7567 cmds 0xC0/0xC8 (COM scan dir)
+  *         and 0xA0/0xA1 (segment remap) once per toggle, then leaves the
+  *         draw fast-path identical between the two orientations.  Net
+  *         CPU saving on every frame.
+  *
+  *         Because we now boot with U8G2_R0 instead of R2, the default
+  *         orientation has changed — flip mode 1 becomes the "normal"
+  *         (right-handed) layout and flip mode 0 is southpaw.
+  * @param  enable: 1=southpaw, 0=normal
   */
 /*============================================================================*/
 void m1_lcd_set_southpaw(uint8_t enable)
 {
-    const u8g2_cb_t *rot = enable ? U8G2_R0 : U8G2_R2;
-    u8g2_SetDisplayRotation(&m1_u8g2, rot);
+    /* Normal/right-handed: flip mode 1 (matches the prior R2 rotation).
+     * Southpaw/left-handed:  flip mode 0 (matches the prior R0 rotation). */
+    u8g2_SetFlipMode(&m1_u8g2, enable ? 0U : 1U);
+    /* The flip cmd alters the panel state without touching our framebuffer,
+     * so the dirty-check cache must be invalidated to force the next page
+     * push. */
+    m1_lcd_force_redraw();
 }
 
 
