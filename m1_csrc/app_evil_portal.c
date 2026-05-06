@@ -15,6 +15,25 @@
 * of commands, accessed through `spi_AT_send_recv()`.  No local TCP stack
 * is required on the STM32.
 *
+* DNS hijack (TODO - requires ESP-AT firmware change)
+* ----------------------------------------------------
+* ESP-AT has no built-in UDP catchall DNS server. The clean fix is a
+* custom AT command "AT+M1DNSHIJACK=<ip>" that runs a lwip_recvfrom
+* loop on UDP/53 and answers every A query with <ip>. Until that
+* lands in factory_ESP32C6-SPI.bin, captive-portal probe paths are
+* the primary trigger (see ep_is_captive_probe_path); clients that
+* bypass them with a hostname-only check (e.g. connectivitycheck.
+* gstatic.com) will not see our portal because their A query escapes
+* through the open network with no upstream resolver.
+*
+* The needed ESP-side change (in esp32-at-hid/) is roughly:
+*   1. esp_at_custom_cmd register "AT+M1DNSHIJACK"
+*   2. xTaskCreate listening on UDP 53 via socket()/bind()
+*   3. Parse incoming DNS query header, copy txn id, set QR=1, AA=1,
+*      ANCOUNT=1, append A record with TTL=60 and provided IP.
+*   4. sendto() back to the source.
+* Reference: see macless-haystack source for a minimal implementation.
+*
 * M1 Project
 *
 */
@@ -88,6 +107,13 @@ static uint8_t s_ep_channel = EP_CHANNEL_DEFAULT;
 
 static char s_ep_at_buf[EP_AT_BUF_SIZE];
 static char s_ep_http_buf[EP_HTTP_REQ_MAX];
+
+/* Pre-portal STA association snapshot, captured before AT+CWMODE=2
+ * drops the connection so we can log it on portal exit. ESP-AT does
+ * not expose the STA password back to the master, so a full
+ * reconnect is the user's responsibility on the WiFi page. */
+static bool s_ep_had_sta_assoc;
+static char s_ep_saved_ssid[64];
 
 static ep_cred_t s_ep_creds[EP_MAX_CRED_LOG];
 static uint16_t  s_ep_cred_count;
@@ -537,10 +563,41 @@ static bool ep_select_channel(void)
   * @brief Bring up the soft-AP and TCP server on the ESP32-C6.
   */
 /*============================================================================*/
+/* Snapshot the current STA association (if any) before the portal
+ * forces the radio into pure SoftAP mode. Records the SSID so the
+ * teardown path can surface it to the user. ESP-AT does not return
+ * the password from CWJAP? for security reasons. */
+static void ep_snapshot_sta_assoc(void)
+{
+    s_ep_had_sta_assoc = false;
+    s_ep_saved_ssid[0] = '\0';
+
+    if (spi_AT_send_recv("AT+CWJAP?\r\n", s_ep_at_buf,
+                         sizeof(s_ep_at_buf), EP_AT_TIMEOUT_SHORT) != SUCCESS)
+        return;
+    const char *p = strstr(s_ep_at_buf, "+CWJAP:");
+    if (!p) return;
+    p += 7;
+    if (*p == '"') {
+        p++;
+        const char *q = strchr(p, '"');
+        if (!q) return;
+        size_t n = (size_t)(q - p);
+        if (n >= sizeof(s_ep_saved_ssid)) n = sizeof(s_ep_saved_ssid) - 1;
+        memcpy(s_ep_saved_ssid, p, n);
+        s_ep_saved_ssid[n] = '\0';
+        s_ep_had_sta_assoc = true;
+    }
+}
+
 static bool ep_start_ap(void)
 {
     char cmd[128];
     bool ok = true;
+
+    /* Snapshot pre-portal STA association so ep_stop_ap can surface
+     * the prior SSID on portal exit. */
+    ep_snapshot_sta_assoc();
 
     /* Drop any existing connections / server */
     spi_AT_send_recv("AT+CIPSERVER=0\r\n", s_ep_at_buf, sizeof(s_ep_at_buf), EP_AT_TIMEOUT_SHORT);
@@ -599,6 +656,16 @@ static void ep_stop_ap(void)
                      sizeof(s_ep_at_buf), EP_AT_TIMEOUT_SHORT);
     spi_AT_send_recv("AT+CWMODE=1\r\n", s_ep_at_buf,
                      sizeof(s_ep_at_buf), EP_AT_TIMEOUT_SHORT);
+    /* Surface the pre-portal SSID so the user can reconnect manually
+     * via the WiFi menu. ESP-AT does not return the password back to
+     * us so a fully automatic reconnect is not possible without a
+     * stored copy in M1's WiFi-cred store. */
+    if (s_ep_had_sta_assoc && s_ep_saved_ssid[0] != '\0') {
+        char line2[28];
+        snprintf(line2, sizeof(line2), "Was: %.20s", s_ep_saved_ssid);
+        ep_display_msg("Reconnect manually:", line2);
+        osDelay(2000);
+    }
 }
 
 /*============================================================================*/
