@@ -165,6 +165,6 @@ Three version numbers coexist in M1PPER, each tracking something different:
 | ---------------- | ------------------ | ----------------------------------------------------------------- |
 | Monstatek base   | `v0.8.0.0`         | Upstream Monstatek firmware compatibility. Fixed — do not change. |
 | C3 revision      | `-C3.6`            | M1PPER community fork revision. Displayed after the base version. |
-| Artifact version | `M1_T-1000_v0.1.2` | Repository release tag. Used in the binary filename.              |
+| Artifact version | `M1_T-1000_v1.0.0` | Repository release tag. Used in the binary filename.              |
 
-The on-device display shows `v0.8.0.0-C3.6`. The binary you flash is named `M1_T-1000_v0.1.2_wCRC.bin`. These numbers are independent — a new artifact release does not imply a new C3 revision and vice versa.
+The on-device display shows `v0.8.0.0-C3.6`. The binary you flash is named `M1_T-1000_v1.0.0_wCRC.bin`. These numbers are independent — a new artifact release does not imply a new C3 revision and vice versa.

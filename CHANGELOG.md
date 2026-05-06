@@ -4,7 +4,7 @@ All notable changes to M1PPER are documented here.
 
 ---
 
-## [0.1.2] - C3.6 - 2026-05-06
+## [1.0.0] - C3.6 - 2026-05-06
 
 ### Added
 
