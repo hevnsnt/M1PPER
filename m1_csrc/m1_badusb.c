@@ -480,21 +480,28 @@ static bool badusb_parse_line(const char *line)
         strncmp(line, "REM\n", 4) == 0 || strcmp(line, "REM") == 0)
         return true;
 
-    /* DELAY <ms> */
+    /* DELAY <ms> — clamp to [0, 60000] (1 minute) so a Ducky script that
+     * fat-fingers DELAY 99999999 cannot freeze the menu task forever
+     * (audit 06-security medium / Phase 5.14). */
     if (strncmp(line, "DELAY ", 6) == 0)
     {
-        uint32_t ms = (uint32_t)atoi(line + 6);
+        long raw = atol(line + 6);
+        uint32_t ms = (raw < 0) ? 0u : (raw > 60000) ? 60000u : (uint32_t)raw;
         if (ms > 0)
             osDelay(ms);
         return true;
     }
 
-    /* DEFAULT_DELAY <ms> */
+    /* DEFAULT_DELAY <ms> — same [0, 60000] clamp; default_delay_ms is
+     * uint16_t so anything > 65535 silently truncated previously. */
     if (strncmp(line, "DEFAULT_DELAY ", 14) == 0 ||
         strncmp(line, "DEFAULTDELAY ", 13) == 0)
     {
         const char *p = line + (line[7] == '_' ? 14 : 13);
-        badusb_state.default_delay_ms = (uint16_t)atoi(p);
+        long raw = atol(p);
+        if (raw < 0) raw = 0;
+        if (raw > 60000) raw = 60000;
+        badusb_state.default_delay_ms = (uint16_t)raw;
         return true;
     }
 
@@ -556,13 +563,35 @@ static bool badusb_parse_line(const char *line)
         return true;
     }
 
-    /* RANDOM_DELAY <min_ms> <max_ms> */
+    /* RANDOM_DELAY <min_ms> <max_ms>
+     *
+     * Hardening (Phase 5.14):
+     *   - clamp lo and hi to [0, 60000] so a malicious script can't pin
+     *     the BadUSB task on osDelay() effectively forever
+     *   - explicitly reject lo > hi (prior code silently snapped them)
+     *   - guard range==0 against div-by-zero in (rand() % range)
+     *   - if scanf yields fewer than two values, treat the missing field
+     *     as 0 (sscanf leaves them as initialised 0)
+     */
     if (strncmp(line, "RANDOM_DELAY ", 13) == 0)
     {
-        uint32_t lo = 0, hi = 0;
-        sscanf(line + 13, "%lu %lu", &lo, &hi);
-        if (hi < lo) hi = lo;
-        uint32_t range = hi - lo + 1;
+        long raw_lo = 0, raw_hi = 0;
+        if (sscanf(line + 13, "%ld %ld", &raw_lo, &raw_hi) < 1)
+            return true; /* ignore malformed line */
+        if (raw_lo < 0) raw_lo = 0;
+        if (raw_hi < 0) raw_hi = 0;
+        if (raw_lo > 60000) raw_lo = 60000;
+        if (raw_hi > 60000) raw_hi = 60000;
+        if (raw_hi < raw_lo) {
+            /* Reject lo > hi explicitly rather than silently snapping —
+             * the old "hi = lo" path produced a fixed delay that hid the
+             * scripting bug. */
+            return true;
+        }
+        uint32_t lo = (uint32_t)raw_lo;
+        uint32_t hi = (uint32_t)raw_hi;
+        uint32_t range = hi - lo + 1u;
+        if (range == 0) return true;
         uint32_t delay = lo + ((uint32_t)rand() % range);
         if (delay > 0) osDelay(delay);
         return true;
@@ -774,7 +803,11 @@ static const char *badusb_skip_block(const char *p, const char *end,
         const char *le = p;
         while (le < end && *le != '\n') le++;
         size_t ll = (size_t)(le - p);
-        char lbuf[64];
+        /* Bumped 64 -> 256 to match BADUSB_MAX_LINE_LEN. With a 64-byte
+         * window an open/close keyword sitting in column 64+ would be
+         * truncated, mis-counting depth and leaving the engine stuck in
+         * the wrong block (audit 06-security / Phase 5.14). */
+        char lbuf[256];
         if (ll >= sizeof(lbuf)) ll = sizeof(lbuf) - 1;
         memcpy(lbuf, p, ll);
         lbuf[ll] = '\0';
@@ -1049,7 +1082,13 @@ bool badusb_execute_file(const char *filepath)
                     while (scan < end && depth > 0) {
                         const char *le2 = scan;
                         while (le2 < end && *le2 != '\n') le2++;
-                        char lb2[64];
+                        /* Bumped 64 -> 256 (audit 06-security medium / Phase
+                         * 5.14). The previous 64-byte buffer silently
+                         * truncated long lines so an "IF (long_expr) THEN"
+                         * inside a longer line would not match the IF/END_IF
+                         * grammar and the depth counter would skew, leaving
+                         * the outer block stuck. 256 matches BADUSB_MAX_LINE_LEN. */
+                        char lb2[256];
                         size_t ll2 = (size_t)(le2 - scan);
                         if (ll2 >= sizeof(lb2)) ll2 = sizeof(lb2)-1;
                         memcpy(lb2, scan, ll2); lb2[ll2] = '\0';
