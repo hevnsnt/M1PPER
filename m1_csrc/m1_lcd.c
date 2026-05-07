@@ -242,8 +242,13 @@ void m1_lcd_init(SPI_HandleTypeDef *phspi)
 	/* Default to "normal" (right-handed) orientation — matches the visual
 	 * layout that the legacy U8G2_R2 setup produced.  m1_lcd_set_southpaw()
 	 * called from settings_load_from_sd will flip this if the user has the
-	 * left-handed preference saved. */
-	u8g2_SetFlipMode(&m1_u8g2, 1U);
+	 * left-handed preference saved.
+	 *
+	 * Empirical: on the M1's panel mounting, flip mode 0 (cmds 0xA1 + 0xC0)
+	 * produces the same orientation that the prior U8G2_R2 software rotation
+	 * did.  Phase 7's first attempt picked mode 1 and the screen came up
+	 * inverted; verified on-device. */
+	u8g2_SetFlipMode(&m1_u8g2, 0U);
 
 	/* First post-boot frame must always push — the panel may have any prior
 	 * state and our local CRC cache is uninitialized before the first call.
@@ -296,9 +301,10 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 /*============================================================================*/
 void m1_lcd_set_southpaw(uint8_t enable)
 {
-    /* Normal/right-handed: flip mode 1 (matches the prior R2 rotation).
-     * Southpaw/left-handed:  flip mode 0 (matches the prior R0 rotation). */
-    u8g2_SetFlipMode(&m1_u8g2, enable ? 0U : 1U);
+    /* Normal/right-handed: flip mode 0 (cmds 0xA1 + 0xC0) matches the prior
+     * U8G2_R2 rotation on the M1 panel.
+     * Southpaw/left-handed:  flip mode 1 (cmds 0xA0 + 0xC8). */
+    u8g2_SetFlipMode(&m1_u8g2, enable ? 1U : 0U);
     /* The flip cmd alters the panel state without touching our framebuffer,
      * so the dirty-check cache must be invalidated to force the next page
      * push. */
